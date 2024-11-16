@@ -10,6 +10,7 @@ import { QuizWorker } from "./src/QuizWorker";
 import packageJson from "./package.json";
 import { Quiz } from "./src/Quiz";
 import { ScoreCalculationLoop } from "./src/ScoreCalculationLoop";
+import { WinnersProver } from "./src/WinnersProver";
 
 export async function zkcloudworker(cloud: Cloud): Promise<zkCloudWorker> {
   console.log(
@@ -26,7 +27,7 @@ export async function verify(chain: blockchain): Promise<VerificationData> {
   if (chain !== "devnet") throw new Error("Unsupported chain");
   return {
     contract: Quiz,
-    programDependencies: [],
+    programDependencies: [WinnersProver],
     contractDependencies: [],
     address: "B62qrZso6WMaxZPrkDHW9sa7BTtVKjHon6BJxUbN3q6PwdTNQXWvADD",
     chain: "devnet",

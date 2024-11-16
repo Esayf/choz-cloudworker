@@ -66,3 +66,5 @@ export const ScoreCalculationLoop = ZkProgram({
         }
     }
 })
+
+export class ScoreProof extends ZkProgram.Proof(ScoreCalculationLoop) {}
