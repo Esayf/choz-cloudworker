@@ -22,7 +22,7 @@ import {
     MerkleMap,
     Proof,
 } from "o1js";
-import { Quiz, QuizState, WinnerState } from "./Quiz";
+import { adminKey, Quiz, QuizState, WinnerState } from "./Quiz";
 import { ScoreCalculationLoop, UserAnswers, CorrectAnswers, ScoreProof } from "./ScoreCalculationLoop";
 import { Winner, WinnerInput, WinnerOutput, WinnersProof, WinnersProver } from "./WinnersProver";
 
@@ -40,6 +40,15 @@ export class QuizWorker extends zkCloudWorker {
     private async compile(): Promise<void> {
         try {
 
+            if(QuizWorker.scoreCalculationVerificationKey === undefined) {
+                console.time("compiled ScoreCalculationLoop");
+                QuizWorker.scoreCalculationVerificationKey = (
+                    await ScoreCalculationLoop.compile({
+                        cache: this.cache,
+                    })
+                ).verificationKey;
+                console.timeEnd("compiled ScoreCalculationLoop");
+            }
 
             if (QuizWorker.winnerVerificationKey === undefined) {
                 console.time("compiled WinnersProver");
@@ -73,32 +82,32 @@ export class QuizWorker extends zkCloudWorker {
         console.time(msg);
         const args = JSON.parse(transaction);
 
-        const userAnswers: UserAnswers = UserAnswers.fromFields(
-            deserializeFields(args.userAnswers)
-        ) as UserAnswers;
+        const userAnswers: UserAnswers = args.userAnswers as UserAnswers;
 
-        const correctAnswers: CorrectAnswers = CorrectAnswers.fromFields(
-            deserializeFields(args.correctAnswers)
-        ) as CorrectAnswers;
-
+        const correctAnswers: CorrectAnswers = args.correctAnswers as CorrectAnswers;
         await this.compile();
         if (QuizWorker.scoreCalculationVerificationKey === undefined)
             throw new Error("verificationKey is undefined");
 
+        if(userAnswers.answers.length < 80) {
+            for(let i = userAnswers.answers.length; i < 80; i++) {
+                userAnswers.answers.push(Field(0));
+                correctAnswers.answers.push(Field(7));
+            }
+        }
+
         const proof = await ScoreCalculationLoop.calculateScore(userAnswers, correctAnswers);
         console.timeEnd(msg);
-
+        console.log("score", proof.proof.publicOutput);
         return JSON.stringify(proof.proof.toJSON(), null, 2);
     }
 
     private async initWinnerMap(contractAddress: PublicKey): Promise<string> {
         await this.compile();
-        const deployerKeyPair = await this.cloud.getDeployer();
-        if (deployerKeyPair === undefined)
-            throw new Error("deployerKeyPair is undefined");
-        
-        const deployer = PrivateKey.fromBase58(deployerKeyPair.privateKey);
-        const sender = deployer.toPublicKey();
+        const deployer = await fetchMinaAccount({ publicKey: adminKey.toPublicKey(), force: true });
+        if(deployer.account === undefined)
+            throw new Error("deployer is undefined");
+        const sender = deployer.account.publicKey;
         const proof = await WinnersProver.init(new WinnerInput({
             contractAddress: contractAddress,
             previousWinner: new Winner({
@@ -121,9 +130,13 @@ export class QuizWorker extends zkCloudWorker {
             }
         );
         await tx.prove();
-        tx.sign([deployer]);
+        tx.sign([adminKey]);
 
         const txSent = await tx.send();
+        await this.cloud.releaseDeployer({
+            publicKey: adminKey.toPublicKey().toString(),
+            txsHashes: txSent?.hash ? [txSent.hash] : [],
+        });
         return txSent?.hash ? JSON.stringify(proof.auxiliaryOutput, null, 2) : "Error sending transaction";
     }
 
@@ -154,16 +167,16 @@ export class QuizWorker extends zkCloudWorker {
         if (this.cloud.args === undefined)
             throw new Error("this.cloud.args is undefined");
         const args = JSON.parse(this.cloud.args);
-        
-        if (args.contractAddress === undefined)
-            throw new Error("args.contractAddress is undefined");
-
+        console.log("args", args);
         switch (this.cloud.task) {
             case "initQuiz":
                 return await this.initQuiz(args);
 
             case "initWinnerMap":
                 return await this.initWinnerMap(PublicKey.fromBase58(args.contractAddress));
+            
+            case "calculateScore":
+                return await this.calculateScore(JSON.stringify(args));
 
             case "setWinner":
                 return await this.addWinner(args);
@@ -185,12 +198,7 @@ export class QuizWorker extends zkCloudWorker {
         rewardPerWinner: string;
     }): Promise<string> {
         await this.compile();
-        const deployerKeyPair = await this.cloud.getDeployer();
-        if (deployerKeyPair === undefined)
-            throw new Error("deployerKeyPair is undefined");
-        
-        const deployer = PrivateKey.fromBase58(deployerKeyPair.privateKey);
-        const sender = deployer.toPublicKey();
+        const sender = adminKey.toPublicKey();
         const contractAddress = PublicKey.fromBase58(args.contractAddress);
         const zkApp = new Quiz(contractAddress);
 
@@ -209,11 +217,11 @@ export class QuizWorker extends zkCloudWorker {
         );
 
         await tx.prove();
-        tx.sign([deployer]);
+        tx.sign([adminKey]);
 
         const txSent = await tx.send();
         await this.cloud.releaseDeployer({
-            publicKey: deployerKeyPair.publicKey,
+            publicKey: adminKey.toPublicKey().toString(),
             txsHashes: txSent?.hash ? [txSent.hash] : [],
         });
 
@@ -230,12 +238,7 @@ export class QuizWorker extends zkCloudWorker {
         winner3Proof: JsonProof;
     }): Promise<string> {
         await this.compile();
-        const deployerKeyPair = await this.cloud.getDeployer();
-        if (deployerKeyPair === undefined)
-            throw new Error("deployerKeyPair is undefined");
-
-        const deployer = PrivateKey.fromBase58(deployerKeyPair.privateKey);
-        const sender = deployer.toPublicKey();
+        const sender = adminKey.toPublicKey();
         const contractAddress = PublicKey.fromBase58(args.contractAddress);
         const zkApp = new Quiz(contractAddress);
 
@@ -250,11 +253,11 @@ export class QuizWorker extends zkCloudWorker {
         );
 
         await tx.prove();
-        tx.sign([deployer]);
+        tx.sign([adminKey]);
 
         const txSent = await tx.send();
         await this.cloud.releaseDeployer({
-            publicKey: deployerKeyPair.publicKey,
+            publicKey: adminKey.toPublicKey().toString(),
             txsHashes: txSent?.hash ? [txSent.hash] : [],
         });
 

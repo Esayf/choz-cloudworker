@@ -5,15 +5,20 @@ import {
     UInt64,
     setNumberOfWorkers,
     Field,
+    Mina,
+    AccountUpdate,
 } from "o1js";
 import {
     zkCloudWorkerClient,
     blockchain,
     initBlockchain,
+    fetchMinaAccount,
+    sleep,
 } from "zkcloudworker";
 import { zkcloudworker } from "..";
 import { Winner } from "../src/WinnersProver";
 import { UserAnswers, CorrectAnswers } from "../src/ScoreCalculationLoop";
+import { adminKey } from "../src/Quiz";
 
 const { chain, compile, deploy, useLocalCloudWorker } = processArguments();
 
@@ -29,22 +34,57 @@ describe('QuizWorker Tests', () => {
 
     beforeAll(async () => {
         console.log("local chain:", chain);
+
+        setNumberOfWorkers(8);
+
         const { keys } = await initBlockchain(chain, 2);
         expect(keys.length).toBeGreaterThanOrEqual(2);
         if (keys.length < 2) throw new Error("Invalid keys");
         deployer = keys[0].key;
+        const deployerAccountUpdateTransaction = await Mina.transaction(
+            { sender: deployer.toPublicKey(), fee: "100000000", memo: "payment" },
+            async () => {
+                AccountUpdate.fundNewAccount(adminKey.toPublicKey());
+            }
+        );
+        deployerAccountUpdateTransaction.sign([deployer]);
+        await sendTx(deployerAccountUpdateTransaction, "fund deployer account");
+        sleep(10000);
+        process.env.DEPLOYER_PRIVATE_KEY = deployer.toBase58();
+        process.env.DEPLOYER_PUBLIC_KEY = deployer.toPublicKey().toBase58();
         contractAddress = PrivateKey.random().toPublicKey();
-        setNumberOfWorkers(8);
+        try {
+            await fetchMinaAccount({ publicKey: adminKey.toPublicKey() });
+            if (!Mina.hasAccount(adminKey.toPublicKey())) {
+                console.log("Block producer account not found, creating...");
+
+                const wallet = keys[1];
+                console.log("wallet:", wallet.toBase58());
+
+                const transaction = await Mina.transaction(
+                    { sender: wallet, fee: 100_000_000, memo: "payment" },
+                    async () => {
+                        const senderUpdate = AccountUpdate.createSigned(wallet);
+                        senderUpdate.balance.subInPlace(500_000_000_000);
+                        senderUpdate.send({
+                            to: adminKey.toPublicKey(),
+                            amount: 500_000_000_000,
+                        });
+                    }
+                );
+                transaction.sign([wallet.key]);
+                await sendTx(transaction, "block producer account creation");
+            }
+        } catch (error: any) {
+            console.error("Error in block producer account creation:", error);
+            return;
+        }
     });
 
-/*     it('should calculate score through worker', async () => {
+    it('should calculate score through worker', async () => {
         // Create test answers
-        const userAnswers = new UserAnswers({
-            answers: [Field(1), Field(2), Field(3)]
-        });
-        const correctAnswers = new CorrectAnswers({
-            answers: [Field(1), Field(2), Field(3)]
-        });
+        const userAnswers = new UserAnswers([Field(1), Field(2), Field(3)]);
+        const correctAnswers = new CorrectAnswers([Field(1), Field(2), Field(3)]);
 
         const response = await api.execute({
             developer: "test_dev",
@@ -52,8 +92,8 @@ describe('QuizWorker Tests', () => {
             transactions: [],
             task: "calculateScore",
             args: JSON.stringify({
-                userAnswers: userAnswers.toFields().map(f => f.toString()),
-                correctAnswers: correctAnswers.toFields().map(f => f.toString())
+                userAnswers: userAnswers,
+                correctAnswers: correctAnswers
             }),
             metadata: "calculate score test",
         });
@@ -69,7 +109,7 @@ describe('QuizWorker Tests', () => {
 
         expect(result.success).toBeTruthy();
         expect(result.result.result).toBeDefined();
-    }); */
+    });
 
     it('should initialize winner map through worker', async () => {
         const response = await api.execute({
@@ -158,13 +198,8 @@ describe('QuizWorker Tests', () => {
             transactions: [],
             task: "payoutWinners",
             args: JSON.stringify({
-                contractAddress: contractAddress.toBase58(),
-                winner1: winner1.toBase58(),
                 winner1Proof: "mock_proof_1", // You'll need actual proofs here
-                winner2: winner2.toBase58(),
                 winner2Proof: "mock_proof_2",
-                winner3: winner3.toBase58(),
-                winner3Proof: "mock_proof_3"
             }),
             metadata: "payout winners test",
         });
@@ -215,4 +250,49 @@ function processArguments(): {
             ? cloud === "local"
             : chainName === "local" || chainName === "lightnet",
     };
+}
+
+async function sendTx(
+    tx: Mina.Transaction<false, true> | Mina.Transaction<true, true>,
+    description?: string
+) {
+    try {
+        let txSent;
+        let sent = false;
+        while (!sent) {
+            txSent = await tx.safeSend();
+            if (txSent.status === "pending") {
+                sent = true;
+                console.log(
+                    `${description ?? ""} tx sent: hash: ${txSent.hash} status: ${txSent.status}`
+                );
+            } else if (chain === "zeko") {
+                console.log("Retrying Zeko tx");
+                await sleep(10000);
+            } else {
+                console.log(
+                    `${description ?? ""} tx NOT sent: hash: ${txSent?.hash} status: ${txSent?.status}`
+                );
+                return "Error sending transaction";
+            }
+        }
+
+        if (txSent === undefined) throw new Error("txSent is undefined");
+        if (txSent.errors.length > 0) {
+            console.error(
+                `${description ?? ""} tx error: hash: ${txSent.hash} status: ${txSent.status} errors: ${txSent.errors}`
+            );
+        }
+
+        if (txSent.status === "pending") {
+            console.log(`Waiting for tx inclusion...`);
+            const txIncluded = await txSent.safeWait();
+            console.log(
+                `${description ?? ""} tx included into block: hash: ${txIncluded.hash} status: ${txIncluded.status}`
+            );
+        }
+    } catch (error) {
+        if (chain !== "zeko") console.error("Error sending tx", error);
+    }
+    if (chain !== "local") await sleep(10000);
 }
