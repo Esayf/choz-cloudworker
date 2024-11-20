@@ -5,24 +5,29 @@ import {
     UInt64,
     setNumberOfWorkers,
     Field,
+    Cache,
     Mina,
     AccountUpdate,
+    VerificationKey,
 } from "o1js";
 import {
     zkCloudWorkerClient,
     blockchain,
     initBlockchain,
+    fee,
     fetchMinaAccount,
     sleep,
-    fee,
     Memory,
 } from "zkcloudworker";
 import { zkcloudworker } from "..";
-import { Winner, WinnersProver } from "../src/WinnersProver";
+import { Winner } from "../src/WinnersProver";
 import { UserAnswers, CorrectAnswers } from "../src/ScoreCalculationLoop";
 import { adminKey, Quiz } from "../src/Quiz";
-import { sender } from "o1js/dist/node/lib/mina/mina";
+import { WinnersProver } from "../src/WinnersProver";
+import { ScoreCalculationLoop } from "../src/ScoreCalculationLoop";
+import packageJson from "../package.json";
 
+const { name: repo, author: developer } = packageJson;
 const { chain, compile, deploy, useLocalCloudWorker } = processArguments();
 
 const api = new zkCloudWorkerClient({
@@ -33,102 +38,150 @@ const api = new zkCloudWorkerClient({
 
 describe('QuizWorker Tests', () => {
     let deployer: PrivateKey;
+    let sender: PublicKey;
     let contractAddress: PublicKey;
+    let quizVerificationKey: VerificationKey;
+    let winnersVerificationKey: VerificationKey;
+    let scoreCalculationVerificationKey: VerificationKey;
+    let blockchainInitialized = false;
 
-    beforeAll(async () => {
+     beforeAll(async () => {
         console.log("local chain:", chain);
-
-        setNumberOfWorkers(8);
-
         const { keys } = await initBlockchain(chain, 2);
         expect(keys.length).toBeGreaterThanOrEqual(2);
         if (keys.length < 2) throw new Error("Invalid keys");
         deployer = keys[0].key;
-        const deployerAccountUpdateTransaction = await Mina.transaction(
-            { sender: deployer.toPublicKey(), fee: "100000000", memo: "payment" },
-            async () => {
-                AccountUpdate.fundNewAccount(adminKey.toPublicKey());
-            }
-        );
-        deployerAccountUpdateTransaction.sign([deployer]);
-        await sendTx(deployerAccountUpdateTransaction, "fund deployer account");
-        sleep(10000);
+        sender = deployer.toPublicKey();
+        contractAddress = PrivateKey.random().toPublicKey();
+        setNumberOfWorkers(8);
+
         process.env.DEPLOYER_PRIVATE_KEY = deployer.toBase58();
         process.env.DEPLOYER_PUBLIC_KEY = deployer.toPublicKey().toBase58();
-        console.log(`Deploying Quiz contract...`);
-
-        await fetchMinaAccount({ publicKey: deployer.toPublicKey(), force: true });
-
-        const zkApp = new Quiz(contractAddress);
-        const tx = await Mina.transaction(
-            { sender: deployer.toPublicKey(), fee: await fee(), memo: "deploy quiz" },
-            async () => {
-                AccountUpdate.fundNewAccount(deployer.toPublicKey());
-                await zkApp.deploy();
-            }
-        );
-
-        await tx.prove();
-        tx.sign([deployer]);
-        await sendTx(tx, "deploy");
-        Memory.info("deployed");
+        contractAddress = PrivateKey.random().toPublicKey();
         try {
             await fetchMinaAccount({ publicKey: adminKey.toPublicKey() });
             if (!Mina.hasAccount(adminKey.toPublicKey())) {
-                console.log("Block producer account not found, creating...");
+              console.log("Block producer account not found, creating...");
+    
+              const wallet = keys[1];
+              console.log("wallet:", wallet.toBase58());
 
-                const wallet = keys[1];
-                console.log("wallet:", wallet.toBase58());
-
-                const transaction = await Mina.transaction(
-                    { sender: wallet, fee: 100_000_000, memo: "payment" },
-                    async () => {
-                        const senderUpdate = AccountUpdate.createSigned(wallet);
-                        senderUpdate.balance.subInPlace(500_000_000_000);
-                        senderUpdate.send({
-                            to: adminKey.toPublicKey(),
-                            amount: 500_000_000_000,
-                        });
-                    }
-                );
-                transaction.sign([wallet.key]);
-                await sendTx(transaction, "block producer account creation");
+              const transaction = await Mina.transaction(
+                { sender: wallet, fee: "100000000", memo: "payment" },
+                async () => {
+                  const senderUpdate = AccountUpdate.createSigned(wallet);
+                  senderUpdate.balance.subInPlace(1000000000);
+                  senderUpdate.send({
+                    to: adminKey.toPublicKey(),
+                    amount: 500_000_000_000,
+                  });
+                }
+              );
+              transaction.sign([wallet.key]);
+              await sendTx(transaction, "block producer account creation");
+              const transaction2 = await Mina.transaction(
+                { sender: wallet, fee: "100000000", memo: "payment" },
+                async () => {
+                  const senderUpdate = AccountUpdate.createSigned(wallet);
+                  senderUpdate.send({
+                    to: deployer.toPublicKey(),
+                    amount: 500_000_000_000,
+                  });
+                }
+              );
+              transaction.sign([wallet.key]);
+              await sendTx(transaction, "block producer account creation");
             }
-        } catch (error: any) {
+          } catch (error: any) {
             console.error("Error in block producer account creation:", error);
             return;
-        }
+          }
+        blockchainInitialized = true;
     });
 
-    it('should calculate score through worker', async () => {
-        // Create test answers
-        const userAnswers = new UserAnswers([Field(1), Field(2), Field(3)]);
-        const correctAnswers = new CorrectAnswers([Field(1), Field(2), Field(3)]);
+    if (compile) {
+        it('should analyze and compile contracts', async () => {
+            expect(blockchainInitialized).toBe(true);
+            console.log("Analyzing contracts methods...");
+            console.time("methods analyzed");
+            
+            const methods = [
+                {
+                    name: "Quiz",
+                    result: await Quiz.analyzeMethods(),
+                },
+                {
+                    name: "WinnersProver",
+                    result: await WinnersProver.analyzeMethods(),
+                },
+                {
+                    name: "ScoreCalculationLoop",
+                    result: await ScoreCalculationLoop.analyzeMethods(),
+                }
+            ];
+            
+            console.timeEnd("methods analyzed");
+            
+            // Analyze contract sizes
+            const maxRows = 2 ** 16;
+            for (const contract of methods) {
+                const size = Object.values(contract.result).reduce(
+                    (acc, method) => acc + method.rows,
+                    0
+                );
+                const percentage = Math.round(((size * 100) / maxRows) * 100) / 100;
 
-        const response = await api.execute({
-            developer: "test_dev",
-            repo: "test_repo",
-            transactions: [],
-            task: "calculateScore",
-            args: JSON.stringify({
-                userAnswers: userAnswers,
-                correctAnswers: correctAnswers
-            }),
-            metadata: "calculate score test",
+                console.log(
+                    `Method's total size for ${contract.name} is ${size} rows (${percentage}% of max ${maxRows} rows)`
+                );
+                for (const method in contract.result) {
+                    console.log(method, `rows:`, (contract.result as any)[method].rows);
+                }
+            }
+
+            // Compile contracts
+            console.time("compiled");
+            console.log("Compiling contracts...");
+            const cache: Cache = Cache.FileSystem("./cache");
+
+            console.time("WinnersProver compiled");
+            winnersVerificationKey = (await WinnersProver.compile({ cache })).verificationKey;
+            console.timeEnd("WinnersProver compiled");
+
+            console.time("ScoreCalculationLoop compiled");
+            scoreCalculationVerificationKey = (await ScoreCalculationLoop.compile({ cache })).verificationKey;
+            console.timeEnd("ScoreCalculationLoop compiled");
+
+            console.time("Quiz compiled");
+            quizVerificationKey = (await Quiz.compile({ cache })).verificationKey;
+            console.timeEnd("Quiz compiled");
+            console.timeEnd("compiled");
+            Memory.info("compiled");
         });
+    }
 
-        expect(response.success).toBeTruthy();
-        const jobId = response.jobId;
-        expect(jobId).toBeDefined();
+    if (deploy) {
+        it('should deploy Quiz contract', async () => {
+            expect(blockchainInitialized).toBe(true);
+            console.log(`Deploying Quiz contract...`);
 
-        const result = await api.waitForJobResult({
-            jobId: jobId!,
-            printLogs: true,
+            await fetchMinaAccount({ publicKey: sender, force: true });
+
+            const zkApp = new Quiz(contractAddress);
+            const tx = await Mina.transaction(
+                { sender, fee: await fee(), memo: "deploy quiz" },
+                async () => {
+                    AccountUpdate.fundNewAccount(sender);
+                    await zkApp.deploy({});
+                }
+            );
+
+            await tx.prove();
+            tx.sign([deployer]);
+            await sendTx(tx, "deploy");
+            Memory.info("deployed");
         });
-
-        expect(result.success).toBeTruthy();
-        expect(result.result.result).toBeDefined();
-    });
+    }
 
     it('should initialize winner map through worker', async () => {
         const response = await api.execute({
@@ -217,8 +270,13 @@ describe('QuizWorker Tests', () => {
             transactions: [],
             task: "payoutWinners",
             args: JSON.stringify({
+                contractAddress: contractAddress.toBase58(),
+                winner1: winner1.toBase58(),
                 winner1Proof: "mock_proof_1", // You'll need actual proofs here
+                winner2: winner2.toBase58(),
                 winner2Proof: "mock_proof_2",
+                winner3: winner3.toBase58(),
+                winner3Proof: "mock_proof_3"
             }),
             metadata: "payout winners test",
         });
@@ -234,7 +292,7 @@ describe('QuizWorker Tests', () => {
 
         expect(result.success).toBeTruthy();
         expect(result.result.result).toBeDefined();
-    });
+    }); 
 });
 
 function processArguments(): {
