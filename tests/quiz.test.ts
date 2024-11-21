@@ -7,240 +7,328 @@ import {
     Field,
     Mina,
     AccountUpdate,
+    Cache,
+    VerificationKey
 } from "o1js";
 import {
     zkCloudWorkerClient,
     blockchain,
     initBlockchain,
     fetchMinaAccount,
-    sleep,
     fee,
     Memory,
+    sleep,
+    serializeIndexedMap,
+    accountBalanceMina,
 } from "zkcloudworker";
 import { zkcloudworker } from "..";
 import { Winner, WinnersProver } from "../src/WinnersProver";
-import { UserAnswers, CorrectAnswers } from "../src/ScoreCalculationLoop";
-import { adminKey, Quiz } from "../src/Quiz";
-import { sender } from "o1js/dist/node/lib/mina/mina";
+import { UserAnswers, CorrectAnswers, ScoreCalculationLoop } from "../src/ScoreCalculationLoop";
+import { contract, DEPLOYER } from "./config";
+import { Quiz } from "../src/Quiz";
+import { QuizWorker } from "../src/QuizWorker";
+import { JWT } from "../env.json";
 
-const { chain, compile, deploy, useLocalCloudWorker } = processArguments();
+const { chain, compile, deploy, useLocalCloudWorker, one } = processArguments();
 
 const api = new zkCloudWorkerClient({
-    jwt: useLocalCloudWorker ? "local" : "test_jwt",
+    jwt: useLocalCloudWorker ? "local" : JWT,
     zkcloudworker,
     chain,
 });
+const contractPrivateKey = contract.contractPrivateKey;
+const contractPublicKey = contractPrivateKey.toPublicKey();
+const zkApp = new Quiz(PublicKey.fromBase58(contract.contractAddress));
+let deployer: PrivateKey;
+let blockchainInitialized: boolean = false;
+let sender: PublicKey;
+let winnersVerificationKey: VerificationKey;
+let scoreCalculationVerificationKey: VerificationKey;
+let quizVerificationKey: VerificationKey;
+setNumberOfWorkers(8);
 
 describe('QuizWorker Tests', () => {
-    let deployer: PrivateKey;
-    let contractAddress: PublicKey;
 
-    beforeAll(async () => {
-        console.log("local chain:", chain);
+    it(`should initialize blockchain`, async () => {
 
-        setNumberOfWorkers(8);
-
-        const { keys } = await initBlockchain(chain, 2);
-        expect(keys.length).toBeGreaterThanOrEqual(2);
-        if (keys.length < 2) throw new Error("Invalid keys");
-        deployer = keys[0].key;
-        const deployerAccountUpdateTransaction = await Mina.transaction(
-            { sender: deployer.toPublicKey(), fee: "100000000", memo: "payment" },
-            async () => {
-                AccountUpdate.fundNewAccount(adminKey.toPublicKey());
-            }
-        );
-        deployerAccountUpdateTransaction.sign([deployer]);
-        await sendTx(deployerAccountUpdateTransaction, "fund deployer account");
-        sleep(10000);
+        if (chain === "local" || chain === "lightnet") {
+            console.log("local chain:", chain);
+            const { keys } = await initBlockchain(chain, 2);
+            expect(keys.length).toBeGreaterThanOrEqual(2);
+            if (keys.length < 2) throw new Error("Invalid keys");
+            deployer = keys[0].key;
+        } else {
+            console.log("non-local chain:", chain);
+            await initBlockchain(chain);
+            deployer = PrivateKey.fromBase58(DEPLOYER);
+        }
         process.env.DEPLOYER_PRIVATE_KEY = deployer.toBase58();
         process.env.DEPLOYER_PUBLIC_KEY = deployer.toPublicKey().toBase58();
-        console.log(`Deploying Quiz contract...`);
+        console.log("contract address:", contractPublicKey.toBase58());
+        sender = deployer.toPublicKey();
+        console.log("sender:", sender.toBase58());
+        console.log("Sender balance:", await accountBalanceMina(sender));
+        expect(deployer).toBeDefined();
+        expect(sender).toBeDefined();
+        expect(deployer.toPublicKey().toBase58()).toBe(sender.toBase58());
+        blockchainInitialized = true;
+    });
+    if (compile) {
+        it('should analyze and compile contracts', async () => {
+            expect(blockchainInitialized).toBe(true);
+            console.log("Analyzing contracts methods...");
+            console.time("methods analyzed");
 
-        await fetchMinaAccount({ publicKey: deployer.toPublicKey(), force: true });
+            const methods = [
+                {
+                    name: "Quiz",
+                    result: await Quiz.analyzeMethods(),
+                },
+                {
+                    name: "WinnersProver",
+                    result: await WinnersProver.analyzeMethods(),
+                },
+                {
+                    name: "ScoreCalculationLoop",
+                    result: await ScoreCalculationLoop.analyzeMethods(),
+                }
+            ];
 
-        const zkApp = new Quiz(contractAddress);
-        const tx = await Mina.transaction(
-            { sender: deployer.toPublicKey(), fee: await fee(), memo: "deploy quiz" },
-            async () => {
-                AccountUpdate.fundNewAccount(deployer.toPublicKey());
-                await zkApp.deploy();
-            }
-        );
+            console.timeEnd("methods analyzed");
 
-        await tx.prove();
-        tx.sign([deployer]);
-        await sendTx(tx, "deploy");
-        Memory.info("deployed");
-        try {
-            await fetchMinaAccount({ publicKey: adminKey.toPublicKey() });
-            if (!Mina.hasAccount(adminKey.toPublicKey())) {
-                console.log("Block producer account not found, creating...");
-
-                const wallet = keys[1];
-                console.log("wallet:", wallet.toBase58());
-
-                const transaction = await Mina.transaction(
-                    { sender: wallet, fee: 100_000_000, memo: "payment" },
-                    async () => {
-                        const senderUpdate = AccountUpdate.createSigned(wallet);
-                        senderUpdate.balance.subInPlace(500_000_000_000);
-                        senderUpdate.send({
-                            to: adminKey.toPublicKey(),
-                            amount: 500_000_000_000,
-                        });
-                    }
+            // Analyze contract sizes
+            const maxRows = 2 ** 16;
+            for (const contract of methods) {
+                const size = Object.values(contract.result).reduce(
+                    (acc, method) => acc + method.rows,
+                    0
                 );
-                transaction.sign([wallet.key]);
-                await sendTx(transaction, "block producer account creation");
+                const percentage = Math.round(((size * 100) / maxRows) * 100) / 100;
+
+                console.log(
+                    `Method's total size for ${contract.name} is ${size} rows (${percentage}% of max ${maxRows} rows)`
+                );
+                for (const method in contract.result) {
+                    console.log(method, `rows:`, (contract.result as any)[method].rows);
+                }
             }
-        } catch (error: any) {
-            console.error("Error in block producer account creation:", error);
-            return;
-        }
-    });
 
-    it('should calculate score through worker', async () => {
-        // Create test answers
-        const userAnswers = new UserAnswers([Field(1), Field(2), Field(3)]);
-        const correctAnswers = new CorrectAnswers([Field(1), Field(2), Field(3)]);
+            // Compile contracts
+            console.time("compiled");
+            console.log("Compiling contracts...");
+            const cache: Cache = Cache.FileSystem("./cache");
 
-        const response = await api.execute({
-            developer: "test_dev",
-            repo: "test_repo",
-            transactions: [],
-            task: "calculateScore",
-            args: JSON.stringify({
-                userAnswers: userAnswers,
-                correctAnswers: correctAnswers
-            }),
-            metadata: "calculate score test",
+            console.time("WinnersProver compiled");
+            winnersVerificationKey = (await WinnersProver.compile({ cache })).verificationKey;
+            console.timeEnd("WinnersProver compiled");
+
+            console.time("ScoreCalculationLoop compiled");
+            scoreCalculationVerificationKey = (await ScoreCalculationLoop.compile({ cache })).verificationKey;
+            console.timeEnd("ScoreCalculationLoop compiled");
+
+            console.time("Quiz compiled");
+            quizVerificationKey = (await Quiz.compile({ cache })).verificationKey;
+            console.timeEnd("Quiz compiled");
+            console.timeEnd("compiled");
+            Memory.info("compiled");
+        });
+    }
+    if (deploy) {
+        it(`should deploy contract`, async () => {
+            expect(blockchainInitialized).toBe(true);
+            console.log(`Deploying contract...`);
+
+            await fetchMinaAccount({ publicKey: sender, force: true });
+            const tx = await Mina.transaction(
+                { sender, fee: await fee(), memo: "deploy" },
+                async () => {
+                    const au = AccountUpdate.fundNewAccount(sender);
+                    au.send({to: sender, amount: 9e9});
+                    await zkApp.deploy({verificationKey: quizVerificationKey});
+                    zkApp.account.zkappUri.set("https://choz.io");
+                }
+            );
+
+            tx.sign([deployer, contractPrivateKey]);
+            await sendTx(tx, "deploy");
+            Memory.info("deployed");
+            await sleep(10000);
+        });
+    }
+
+    if (one) {
+        it('should calculate score through worker', async () => {
+            // Create test answers
+            const userAnswers = new UserAnswers([Field(1), Field(2), Field(3)]);
+            const correctAnswers = new CorrectAnswers([Field(1), Field(2), Field(3)]);
+
+            const response = await api.execute({
+                developer: "test_dev",
+                repo: "test_repo",
+                transactions: [],
+                task: "calculateScore",
+                args: JSON.stringify({
+                    userAnswers: userAnswers,
+                    correctAnswers: correctAnswers
+                }),
+                metadata: "calculate score test",
+            });
+
+            expect(response.success).toBeTruthy();
+            const jobId = response.jobId;
+            expect(jobId).toBeDefined();
+
+            const result = await api.waitForJobResult({
+                jobId: jobId!,
+                printLogs: true,
+            });
+
+            expect(result.success).toBeTruthy();
+            expect(result.result.result).toBeDefined();
         });
 
-        expect(response.success).toBeTruthy();
-        const jobId = response.jobId;
-        expect(jobId).toBeDefined();
+        it('should payout winners through worker', async () => {
+            await fetchMinaAccount({ publicKey: sender, force: true });
+            await fetchMinaAccount({ publicKey: contractPublicKey, force: true });
+            //First initialize the quiz state
+            const initQuizResponse = await api.execute({
+                developer: "test_dev",
+                repo: "test_repo",
+                transactions: [],
+                task: "initQuiz",
+                args: JSON.stringify({
+                    contractAddress: contractPublicKey.toBase58(),
+                    secretKey: Field(1),
+                    duration: 1000,
+                    startDate: 1,
+                    totalRewardPoolAmount: 1000,
+                    rewardPerWinner: 400,
+                }),
+                metadata: "init quiz state for payout test",
+            });
 
-        const result = await api.waitForJobResult({
-            jobId: jobId!,
-            printLogs: true,
+            const initQuizResult = await api.waitForJobResult({
+                jobId: initQuizResponse.jobId!,
+                printLogs: true,
+            });
+
+            expect(initQuizResult.success).toBeTruthy();
+            expect(initQuizResult.result.result).toBeDefined();
+
+            // initialize the winner map
+            const initResponse = await api.execute({
+                developer: "test_dev",
+                repo: "test_repo",
+                transactions: [],
+                task: "initWinnerMap",
+                args: JSON.stringify({
+                    contractAddress: contractPublicKey.toBase58(),
+                }),
+                metadata: "init for add winner test",
+            });
+
+            const initResult = await api.waitForJobResult({
+                jobId: initResponse.jobId!,
+                printLogs: true,
+            });
+
+            // Now add a winner
+            const winner = new Winner({
+                publicKey: PrivateKey.random().toPublicKey(),
+                reward: UInt64.from(1000),
+            });
+            const initWinnerResult = JSON.parse(initResult.result.result);
+            const addWinnerResponse = await api.execute({
+                developer: "test_dev",
+                repo: "test_repo",
+                transactions: [],
+                task: "addWinner",
+                args: JSON.stringify({
+                    winner: { publicKey: winner.publicKey.toBase58(), reward: winner.reward.toString() },
+                    previousProof: initWinnerResult.proof,
+                    serializedStringPreviousMap: initWinnerResult.auxiliaryOutput,
+                }, null, 2),
+                metadata: "add winner test",
+            });
+            expect(addWinnerResponse.success).toBeTruthy();
+            const addWinnerJobId = addWinnerResponse.jobId;
+            expect(addWinnerJobId).toBeDefined();
+
+            const addWinnerResult = await api.waitForJobResult({
+                jobId: addWinnerJobId!,
+                printLogs: true,
+            });
+
+            expect(addWinnerResult.success).toBeTruthy();
+            expect(addWinnerResult.result.result).toBeDefined();
+
+            // Now add second winner
+            const secondWinner = new Winner({
+                publicKey: PrivateKey.random().toPublicKey(),
+                reward: UInt64.from(1000),
+            });
+            const addFirstWinnerResultJson = JSON.parse(addWinnerResult.result.result);
+            const addSecondWinnerResponse = await api.execute({
+                developer: "test_dev",
+                repo: "test_repo",
+                transactions: [],
+                task: "addWinner",
+                args: JSON.stringify({
+                    winner: { publicKey: secondWinner.publicKey.toBase58(), reward: secondWinner.reward.toString() },
+                    previousProof: addFirstWinnerResultJson.proof,
+                    serializedStringPreviousMap: addFirstWinnerResultJson.auxiliaryOutput,
+                }, null, 2),
+                metadata: "add second winner test",
+            });
+            expect(addSecondWinnerResponse.success).toBeTruthy();
+            const addSecondWinnerJobId = addSecondWinnerResponse.jobId;
+            expect(addSecondWinnerJobId).toBeDefined();
+
+            const addSecondWinnerResult = await api.waitForJobResult({
+                jobId: addSecondWinnerJobId!,
+                printLogs: true,
+            });
+
+            expect(addSecondWinnerResult.success).toBeTruthy();
+            expect(addSecondWinnerResult.result.result).toBeDefined();
+
+            const secondWinnerResult = JSON.parse(addSecondWinnerResult.result.result)
+            const response = await api.execute({
+                developer: "test_dev",
+                repo: "test_repo",
+                transactions: [],
+                task: "payoutWinners",
+                args: JSON.stringify({
+                    contractAddress: contractPublicKey.toBase58(),
+                    winner1: winner.publicKey.toBase58(),
+                    winner2: secondWinner.publicKey.toBase58(),
+                    winner1Proof: addFirstWinnerResultJson.proof,
+                    winner2Proof: secondWinnerResult.proof,
+                }),
+                metadata: "payout winners test",
+            });
+
+            expect(response.success).toBeTruthy();
+            const jobId = response.jobId;
+            expect(jobId).toBeDefined();
+
+            const result = await api.waitForJobResult({
+                jobId: jobId!,
+                printLogs: true,
+            });
+
+            expect(result.success).toBeTruthy();
+            expect(result.result.result).toBeDefined();
         });
-
-        expect(result.success).toBeTruthy();
-        expect(result.result.result).toBeDefined();
-    });
-
-    it('should initialize winner map through worker', async () => {
-        const response = await api.execute({
-            developer: "test_dev",
-            repo: "test_repo",
-            transactions: [],
-            task: "initWinnerMap",
-            args: JSON.stringify({
-                contractAddress: contractAddress.toBase58(),
-            }),
-            metadata: "init winner map test",
-        });
-
-        expect(response.success).toBeTruthy();
-        const jobId = response.jobId;
-        expect(jobId).toBeDefined();
-
-        const result = await api.waitForJobResult({
-            jobId: jobId!,
-            printLogs: true,
-        });
-
-        expect(result.success).toBeTruthy();
-        expect(result.result.result).toBeDefined();
-    });
-
-    it('should add winner through worker', async () => {
-        // First initialize the winner map
-        const initResponse = await api.execute({
-            developer: "test_dev",
-            repo: "test_repo",
-            transactions: [],
-            task: "initWinnerMap",
-            args: JSON.stringify({
-                contractAddress: contractAddress.toBase58(),
-            }),
-            metadata: "init for add winner test",
-        });
-
-        const initResult = await api.waitForJobResult({
-            jobId: initResponse.jobId!,
-            printLogs: true,
-        });
-
-        // Now add a winner
-        const winner = new Winner({
-            publicKey: PrivateKey.random().toPublicKey(),
-            reward: UInt64.from(1000),
-        });
-
-        const response = await api.execute({
-            developer: "test_dev",
-            repo: "test_repo",
-            transactions: [],
-            task: "setWinner",
-            args: JSON.stringify({
-                winner: winner,
-                previousProof: initResult.result.result,
-                previousMap: initResult.result.auxiliaryOutput,
-            }),
-            metadata: "add winner test",
-        });
-
-        expect(response.success).toBeTruthy();
-        const jobId = response.jobId;
-        expect(jobId).toBeDefined();
-
-        const result = await api.waitForJobResult({
-            jobId: jobId!,
-            printLogs: true,
-        });
-
-        expect(result.success).toBeTruthy();
-        expect(result.result.result).toBeDefined();
-    });
-
-    it('should payout winners through worker', async () => {
-        // Create test winners and their proofs
-        const winner1 = PrivateKey.random().toPublicKey();
-        const winner2 = PrivateKey.random().toPublicKey();
-        const winner3 = PrivateKey.random().toPublicKey();
-
-        const response = await api.execute({
-            developer: "test_dev",
-            repo: "test_repo",
-            transactions: [],
-            task: "payoutWinners",
-            args: JSON.stringify({
-                winner1Proof: "mock_proof_1", // You'll need actual proofs here
-                winner2Proof: "mock_proof_2",
-            }),
-            metadata: "payout winners test",
-        });
-
-        expect(response.success).toBeTruthy();
-        const jobId = response.jobId;
-        expect(jobId).toBeDefined();
-
-        const result = await api.waitForJobResult({
-            jobId: jobId!,
-            printLogs: true,
-        });
-
-        expect(result.success).toBeTruthy();
-        expect(result.result.result).toBeDefined();
-    });
+    }
 });
+
 
 function processArguments(): {
     chain: blockchain;
     compile: boolean;
     deploy: boolean;
+    one: boolean;
     useLocalCloudWorker: boolean;
 } {
     function getArgument(arg: string): string | undefined {
@@ -251,6 +339,11 @@ function processArguments(): {
     const chainName = getArgument("chain") ?? "local";
     const shouldDeploy = getArgument("deploy") ?? "true";
     const compile = getArgument("compile");
+    const one = getArgument("one") ?? "true";
+    const many = getArgument("many") ?? "true";
+    const send = getArgument("send") ?? "false";
+    const files = getArgument("files") ?? "false";
+    const encrypt = getArgument("encrypt") ?? "false";
     const cloud = getArgument("cloud");
 
     if (
@@ -260,11 +353,11 @@ function processArguments(): {
         chainName !== "zeko"
     )
         throw new Error("Invalid chain name");
-
     return {
         chain: chainName as blockchain,
-        compile: compile === "true" || shouldDeploy === "true",
+        compile: compile === "true" || shouldDeploy === "true" || send === "true",
         deploy: shouldDeploy === "true",
+        one: one === "true",
         useLocalCloudWorker: cloud
             ? cloud === "local"
             : chainName === "local" || chainName === "lightnet",
@@ -280,26 +373,29 @@ async function sendTx(
         let sent = false;
         while (!sent) {
             txSent = await tx.safeSend();
-            if (txSent.status === "pending") {
+            if (txSent.status == "pending") {
                 sent = true;
                 console.log(
-                    `${description ?? ""} tx sent: hash: ${txSent.hash} status: ${txSent.status}`
+                    `${description ?? ""} tx sent: hash: ${txSent.hash} status: ${txSent.status
+                    }`
                 );
             } else if (chain === "zeko") {
                 console.log("Retrying Zeko tx");
                 await sleep(10000);
             } else {
                 console.log(
-                    `${description ?? ""} tx NOT sent: hash: ${txSent?.hash} status: ${txSent?.status}`
+                    `${description ?? ""} tx NOT sent: hash: ${txSent?.hash} status: ${txSent?.status
+                    }`
                 );
+                console.log("Errors:", txSent.errors);
                 return "Error sending transaction";
             }
         }
-
         if (txSent === undefined) throw new Error("txSent is undefined");
         if (txSent.errors.length > 0) {
             console.error(
-                `${description ?? ""} tx error: hash: ${txSent.hash} status: ${txSent.status} errors: ${txSent.errors}`
+                `${description ?? ""} tx error: hash: ${txSent.hash} status: ${txSent.status
+                }  errors: ${txSent.errors}`
             );
         }
 
@@ -307,7 +403,8 @@ async function sendTx(
             console.log(`Waiting for tx inclusion...`);
             const txIncluded = await txSent.safeWait();
             console.log(
-                `${description ?? ""} tx included into block: hash: ${txIncluded.hash} status: ${txIncluded.status}`
+                `${description ?? ""} tx included into block: hash: ${txIncluded.hash
+                } status: ${txIncluded.status}`
             );
         }
     } catch (error) {

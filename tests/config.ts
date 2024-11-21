@@ -12,5 +12,4 @@ export const contract: ContractConfig = {
   contractAddress: "B62qrZso6WMaxZPrkDHW9sa7BTtVKjHon6BJxUbN3q6PwdTNQXWvADD",
 };
 
-export const DEPLOYER = "EKFY3NDqUJ4SRaxidXK3nWyyoassi7dRyicZ8pubyoqbUHN84i7J";
-// "B62qrvVL5oJWT8K4ijnq83V3MYHv95jhrJ2T3X56GL7nfowNFvcDFST"
+export const DEPLOYER = "EKEczLAf2S4Ew5Grm6tQ9anwKQjWNVyAdPhiE1d7Q1a5bKxVULwJ";

@@ -22,7 +22,7 @@ type IndexedMerkleMap = Experimental.IndexedMerkleMap;
 /**
  * A specialized IndexedMerkleMap for storing metadata.
  */
-export class WinnerMap extends IndexedMerkleMap(WINNER_HEIGHT) { }
+export class WinnerMap extends IndexedMerkleMap(WINNER_HEIGHT) {}
 // Define the proof type from ScoreCalculationLoop
 export class ScoreProof extends ZkProgram.Proof(ScoreCalculationLoop) { }
 
@@ -68,7 +68,7 @@ const WinnersProver = ZkProgram({
                 publicOutput: WinnerOutput;
                 auxiliaryOutput: WinnerMap;
             }> {
-                const initialMap = new WinnerMap()
+                const initialMap = new WinnerMap();
                 return {
                     publicOutput: new WinnerOutput({
                         contractAddress: contractAddress,
