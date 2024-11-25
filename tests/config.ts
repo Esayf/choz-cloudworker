@@ -1,15 +1,16 @@
 import { PrivateKey } from "o1js";
+import env from "../env.json";
 
 interface ContractConfig {
   contractPrivateKey: PrivateKey;
   contractAddress: string;
 }
-
+const privateKey = PrivateKey.random();
 export const contract: ContractConfig = {
   contractPrivateKey: PrivateKey.fromBase58(
-    "EKEhZwSy9be82EqLT3s8Fa4QPxE8fTGiGW1w3XC4ho3RmWqBmQh2"
+    "EKErezLMeFXhXAicSES9fiRsq6X4VMb1XmZ57L4qzcGMR9VfqcGr"
   ),
-  contractAddress: "B62qrZso6WMaxZPrkDHW9sa7BTtVKjHon6BJxUbN3q6PwdTNQXWvADD",
+  contractAddress: "B62qoz8c3U1DMMyQcRwciARwyKMrayfbtkZMQBUiAsSjkLEyVJtf4CP",
 };
 
-export const DEPLOYER = "EKEczLAf2S4Ew5Grm6tQ9anwKQjWNVyAdPhiE1d7Q1a5bKxVULwJ";
+export const DEPLOYER = env.DEPLOYER_PRIVATE_KEY;

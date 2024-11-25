@@ -11,6 +11,9 @@ import {
     deserializeIndexedMerkleMap,
     IndexedMapSerialized,
     blockchain,
+    serializeTransaction,
+    deserializeTransaction,
+    transactionParams,
 } from "zkcloudworker";
 import {
     verify,
@@ -43,10 +46,13 @@ export class QuizWorker extends zkCloudWorker {
         this.cache = Cache.FileSystem(this.cloud.cache);
     }
 
+    private stringifyJobResult(result: any): string {
+        return JSON.stringify(result, null, 2);
+    }
     private async compile(): Promise<void> {
         try {
             console.time("compiled");
-            if(QuizWorker.scoreCalculationVerificationKey === undefined){
+            if (QuizWorker.scoreCalculationVerificationKey === undefined) {
                 console.time("compiled ScoreCalculationLoop");
                 QuizWorker.scoreCalculationVerificationKey = (
                     await ScoreCalculationLoop.compile({
@@ -90,13 +96,14 @@ export class QuizWorker extends zkCloudWorker {
             throw new Error("deployerKeyPair is undefined");
 
         const deployer = PrivateKey.fromBase58(deployerKeyPair.privateKey);
+        console.log("deployer private key!", deployer.toBase58());
         const sender = deployer.toPublicKey();
         const zkApp = new Quiz(contractAddress);
         const tx = await Mina.transaction(
             { sender, fee: await fee(), memo: "deploy quiz" },
             async () => {
-                AccountUpdate.createSigned(sender);
-                await zkApp.deploy({verificationKey: QuizWorker.quizVerificationKey});
+                await zkApp.deploy({});
+                zkApp.account.zkappUri.set("https://choz.io");
             }
         );
         await tx.prove();
@@ -107,6 +114,119 @@ export class QuizWorker extends zkCloudWorker {
             txsHashes: txSent?.hash ? [txSent.hash] : [],
         });
         return txSent?.hash ?? "Error sending transaction";
+    }
+
+    private async buildDeployQuizTx(args: { contractAddress: string, sender: string }): Promise<string> {
+        await this.compile();
+        const zkApp = new Quiz(PublicKey.fromBase58(args.contractAddress));
+        const tx = await Mina.transaction(
+            { sender: PublicKey.fromBase58(args.sender), fee: await fee(), memo: "deploy quizbu" },
+            async () => {
+                AccountUpdate.fundNewAccount(PublicKey.fromBase58(args.sender));
+                await zkApp.deploy({ verificationKey: QuizWorker.quizVerificationKey });
+                zkApp.account.zkappUri.set("https://choz.io");
+            }
+        );
+        return JSON.stringify({ serializedTransaction: serializeTransaction(tx), transactionJson: tx.toJSON(), fee: tx.transaction.feePayer.body.fee, nonce: tx.transaction.feePayer.body.nonce, memo: tx.transaction.memo });
+    }
+
+    private async proveAndSendDeployQuizTx(args: { contractAddress: string, serializedTransaction: string, signedData: string,
+        secretKey: string,
+        startDate: string,
+        totalRewardPoolAmount: string,
+        rewardPerWinner: string,
+        duration: string
+     }): Promise<string> {
+        await this.compile();
+        const deployerKeyPair = await this.cloud.getDeployer();
+        if (deployerKeyPair === undefined)
+            throw new Error("deployerKeyPair is undefined");
+        const deployer = PrivateKey.fromBase58(deployerKeyPair.privateKey);
+        const zkApp = new Quiz(PublicKey.fromBase58(args.contractAddress));
+        const signedJson = JSON.parse(args.signedData);
+        console.log("signedJson is here on prove", signedJson);
+        const { fee, sender, nonce, memo } = transactionParams(
+            args.serializedTransaction,
+            signedJson
+        );
+        console.log("Rebuild params:", { sender, fee, nonce, memo });
+        const reTransaction = await Mina.transaction(
+            { sender: sender, fee: fee, nonce: nonce, memo: memo },
+            async () => {
+                AccountUpdate.fundNewAccount(sender);
+                await zkApp.deploy({ verificationKey: QuizWorker.quizVerificationKey });
+                await zkApp.initQuizState(Field(args.secretKey), UInt64.from(args.duration), UInt64.from(args.startDate), UInt64.from(args.totalRewardPoolAmount), UInt64.from(args.rewardPerWinner));
+            }
+        );
+
+        const tx = deserializeTransaction(args.serializedTransaction, reTransaction, signedJson);
+        console.time("proved tx");
+        await tx.prove();
+        console.timeEnd("proved tx"); const txJSON = tx.toJSON();
+        try {
+
+            let txSent;
+            let sent = false;
+            while (!sent) {
+                txSent = await tx.safeSend();
+                if (txSent.status == "pending") {
+                    sent = true;
+                    console.log(
+                        `${memo} tx sent: hash: ${txSent.hash} status: ${txSent.status}`
+                    );
+                } else if (this.cloud.chain === "zeko") {
+                    console.log("Retrying Zeko tx");
+                    await sleep(10000);
+                } else {
+                    console.log(
+                        `${memo} tx NOT sent: hash: ${txSent?.hash} status: ${txSent?.status}`,
+                        txSent.errors
+                    );
+                    return this.stringifyJobResult({
+                        success: false,
+                        tx: txJSON,
+                        hash: txSent.hash,
+                        error: String(txSent.errors),
+                    });
+                }
+            }
+            if (this.cloud.isLocalCloud && txSent?.status === "pending") {
+                const txIncluded = await txSent.safeWait();
+                console.log(
+                    `${memo} tx included into block: hash: ${txIncluded.hash} status: ${txIncluded.status}`
+                );
+                return this.stringifyJobResult({
+                    success: true,
+                    tx: txJSON,
+                    hash: txIncluded.hash,
+                });
+            }
+            if (txSent?.hash)
+                this.cloud.publishTransactionMetadata({
+                    txId: txSent?.hash,
+                    metadata: {
+                        sender: sender.toBase58(),
+                        contractAddress: args.contractAddress,
+                        type: "deploy",
+                    } as any,
+                });
+            return this.stringifyJobResult({
+                success:
+                    txSent?.hash !== undefined && txSent?.status == "pending"
+                        ? true
+                        : false,
+                tx: txJSON,
+                hash: txSent?.hash,
+                error: String(txSent?.errors ?? ""),
+            });
+        } catch (error) {
+            console.error("Error sending transaction", error);
+            return this.stringifyJobResult({
+                success: false,
+                tx: txJSON,
+                error: String(error),
+            });
+        }
     }
 
     public async calculateScore(args: {
@@ -123,8 +243,8 @@ export class QuizWorker extends zkCloudWorker {
         if (QuizWorker.scoreCalculationVerificationKey === undefined)
             throw new Error("verificationKey is undefined");
 
-        if(userAnswers.answers.length < 80) {
-            for(let i = userAnswers.answers.length; i < 80; i++) {
+        if (userAnswers.answers.length < 80) {
+            for (let i = userAnswers.answers.length; i < 80; i++) {
                 userAnswers.answers.push(Field(0));
                 correctAnswers.answers.push(Field(7));
             }
@@ -140,7 +260,7 @@ export class QuizWorker extends zkCloudWorker {
         await this.compile();
         const privateKey = PrivateKey.random();
         const deployerKeypair = await this.cloud.getDeployer();
-        if(deployerKeypair === undefined)
+        if (deployerKeypair === undefined)
             throw new Error("deployerKeypair is undefined");
         const deployer = PrivateKey.fromBase58(deployerKeypair.privateKey);
         const sender = deployer.toPublicKey();
@@ -158,7 +278,7 @@ export class QuizWorker extends zkCloudWorker {
             previousRoot: new MerkleMap().getRoot()
         }), PublicKey.fromBase58(contractAddress));
         const zkApp = new Quiz(PublicKey.fromBase58(contractAddress));
-        await fetchMinaAccount({publicKey: sender, force: true});
+        await fetchMinaAccount({ publicKey: sender, force: true });
         const tx = await Mina.transaction(
             { sender, fee: await fee(), memo: "init winner map" },
             async () => {
@@ -167,7 +287,6 @@ export class QuizWorker extends zkCloudWorker {
         );
         await tx.prove();
         tx.sign([deployer]);
-
         const txSent = await tx.send();
         await this.cloud.releaseDeployer({
             publicKey: deployerKeypair.publicKey.toString(),
@@ -188,9 +307,9 @@ export class QuizWorker extends zkCloudWorker {
             auxiliaryOutput: IndexedMerkleMapBase | undefined;
         } = {
             proof: await WinnersProof.fromJSON(args.previousProof),
-            auxiliaryOutput: deserializeIndexedMerkleMap({serializedIndexedMap: args.serializedStringPreviousMap, type: WinnerMap})
+            auxiliaryOutput: deserializeIndexedMerkleMap({ serializedIndexedMap: args.serializedStringPreviousMap, type: WinnerMap })
         };
-        if(winnerPrevProof.auxiliaryOutput === undefined) throw new Error("winnerPrevProof.auxiliaryOutput is undefined");
+        if (winnerPrevProof.auxiliaryOutput === undefined) throw new Error("winnerPrevProof.auxiliaryOutput is undefined");
         const proof = await WinnersProver.addWinner(new WinnerInput({
             contractAddress: winnerPrevProof.proof.publicOutput.contractAddress,
             previousWinner: winnerPrevProof.proof.publicOutput.winner,
@@ -213,12 +332,14 @@ export class QuizWorker extends zkCloudWorker {
                 return await this.calculateScore(args);
             case "deployQuiz":
                 return await this.deployQuiz(PublicKey.fromBase58(args.contractAddress));
-
+            case "buildDeployQuizTx":
+                return await this.buildDeployQuizTx(args);
+            case "proveAndSendDeployQuizTx":
+                return await this.proveAndSendDeployQuizTx(args);
             case "initQuiz":
                 const initQuizResult = await this.initQuiz(args);
                 await sleep(1000);
                 return initQuizResult;
-
             case "initWinnerMap":
                 const initWinnerMapResult = await this.initWinnerMap(args.contractAddress);
                 await sleep(1000);
@@ -249,7 +370,7 @@ export class QuizWorker extends zkCloudWorker {
         const privateKey = PrivateKey.random();
 
         const deployerKeypair = await this.cloud.getDeployer();
-        if(deployerKeypair === undefined)
+        if (deployerKeypair === undefined)
             throw new Error("deployerKeypair is undefined");
         const deployer = PrivateKey.fromBase58(deployerKeypair.privateKey);
         const sender = deployer.toPublicKey();
@@ -261,13 +382,17 @@ export class QuizWorker extends zkCloudWorker {
             { sender, fee: await fee(), memo: "init quiz" },
             async () => {
                 await zkApp.initQuizState(
-                    Field(1), UInt64.from(10 * 100 * 60), UInt64.from(Date.now()), UInt64.from(6e3), UInt64.from(10 * 100 * 60)
+                    Field(args.secretKey),
+                    UInt64.from(args.duration),
+                    UInt64.from(args.startDate),
+                    UInt64.from(args.totalRewardPoolAmount),
+                    rewardPerWinner
                 );
             }
         );
 
         await tx.prove();
-        tx.sign([deployer, privateKey]);
+        tx.sign([deployer]);
 
         const txSent = await sendTx(tx, "init quiz", this.cloud.chain);
 
@@ -284,15 +409,15 @@ export class QuizWorker extends zkCloudWorker {
         await this.compile();
         const privateKey = PrivateKey.random();
         const deployerKeypair = await this.cloud.getDeployer();
-        if(deployerKeypair === undefined)
+        if (deployerKeypair === undefined)
             throw new Error("deployerKeypair is undefined");
         const deployer = PrivateKey.fromBase58(deployerKeypair.privateKey);
         const sender = deployer.toPublicKey();
         const contractAddress = PublicKey.fromBase58(args.contractAddress);
         const zkApp = new Quiz(contractAddress);
-        await fetchMinaAccount({publicKey: deployer.toPublicKey(), force: true});
-        await fetchMinaAccount({publicKey: PublicKey.fromBase58(args.winner1), force: true});
-        await fetchMinaAccount({publicKey: PublicKey.fromBase58(args.winner2), force: true});
+        await fetchMinaAccount({ publicKey: deployer.toPublicKey(), force: true });
+        await fetchMinaAccount({ publicKey: PublicKey.fromBase58(args.winner1), force: true });
+        await fetchMinaAccount({ publicKey: PublicKey.fromBase58(args.winner2), force: true });
         const tx = await Mina.transaction(
             { sender, fee: await fee(), memo: "payout winners" },
             async () => {

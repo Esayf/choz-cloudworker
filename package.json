@@ -1,7 +1,7 @@
 {
-  "name": "worker-example",
-  "version": "0.2.0",
-  "author": "DFST",
+  "name": "choz-worker",
+  "version": "0.0.7",
+  "author": "BlocksOnChain",
   "scripts": {
     "test": "jest",
     "local": "jest --chain=local --cloud=local --deploy=true --send=false --one=true --many=true",
@@ -17,11 +17,11 @@
     "encrypt.local": "jest --chain=local --cloud=local --deploy=false --one=false --many=false --send=false --encrypt=true",
     "encrypt.devnet": "jest --chain=devnet --deploy=false --one=false --many=false --send=false --encrypt=true",
     "test:quiz": "jest quiz.test.ts --detectOpenHandles",
-    "quiz.local": "jest quiz.test.ts --chain=local --cloud=local --compile=true --deploy=true",
+    "quiz.local": "jest quiz.test.ts --chain=local --cloud=local --compile=true --deploy=true --one=true",
     "quiz.lightnet.deploy": "jest quiz.test.ts --chain=lightnet --cloud=local --deploy=true --one=false",
     "quiz.lightnet.run": "jest quiz.test.ts --chain=lightnet --cloud=local --deploy=false --one=true",
-    "quiz.devnet.deploy": "jest quiz.test.ts --chain=devnet --cloud=local --deploy=true --one=false",
-    "quiz.devnet.run": "jest quiz.test.ts --chain=devnet --cloud=local --deploy=false --one=true"
+    "quiz.devnet.deploy": "jest quiz.test.ts --chain=devnet --deploy=true --one=false",
+    "quiz.devnet.run": "jest quiz.test.ts --chain=devnet --deploy=false --one=true"
   },
   "devDependencies": {
     "@jest/globals": "^29.7.0",
@@ -32,6 +32,7 @@
     "typescript": "^5.5.3"
   },
   "dependencies": {
+    "mina-signer": "^3.0.7",
     "o1js": "^2.0.0",
     "zkcloudworker": "^0.16.6"
   },

@@ -5,12 +5,14 @@ import {
   VerificationData,
   blockchain,
 } from "zkcloudworker";
-import { initializeBindings } from "o1js";
+import { initializeBindings, Mina } from "o1js";
 import { QuizWorker } from "./src/QuizWorker";
 import packageJson from "./package.json";
 import { Quiz } from "./src/Quiz";
 import { ScoreCalculationLoop } from "./src/ScoreCalculationLoop";
 import { WinnersProver } from "./src/WinnersProver";
+import { version as o1jsVersion } from "./node_modules/o1js/package.json";
+import { version as zkCloudWorkerVersion } from "./node_modules/zkcloudworker/package.json";
 
 export async function zkcloudworker(cloud: Cloud): Promise<zkCloudWorker> {
   console.log(
@@ -18,6 +20,9 @@ export async function zkcloudworker(cloud: Cloud): Promise<zkCloudWorker> {
       packageJson.version ?? "unknown"
     } on chain ${cloud.chain}`
   );
+    console.log("networkId:", Mina.getNetworkId());
+    console.log(`o1js version: ${o1jsVersion}`);
+    console.log(`zkCloudWorker version: ${zkCloudWorkerVersion}`);
   await initializeBindings();
   await initBlockchain(cloud.chain);
   return new QuizWorker(cloud);

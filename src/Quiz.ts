@@ -83,7 +83,6 @@ export class Quiz extends SmartContract {
         winnersProof2.verify()
         winnersProof1.publicInput.previousRoot.assertEquals(this.winnersRoot.getAndRequireEquals());
         winnersProof2.publicInput.previousRoot.assertEquals(winnersProof1.publicOutput.newRoot);
-        this.sender.getAndRequireSignature();
         assert(winnersProof1.publicOutput.winner.publicKey.equals(winnersProof2.publicInput.winner.publicKey).not(), "winner2 and winner3 must be different");
         // finally, we send the payouts
         this.send({ to: winnersProof1.publicOutput.winner.publicKey, amount: winnersProof1.publicOutput.winner.reward });
