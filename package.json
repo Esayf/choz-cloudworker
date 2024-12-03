@@ -1,6 +1,6 @@
 {
   "name": "choz-worker",
-  "version": "0.0.16",
+  "version": "0.0.17",
   "author": "BlocksOnChain",
   "scripts": {
     "test": "jest",
