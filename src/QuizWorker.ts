@@ -309,10 +309,37 @@ export class QuizWorker extends zkCloudWorker {
             case "payoutWinners":
                 const payoutWinnersResult = await this.payoutWinners(args);
                 return payoutWinnersResult;
-
+            case "withdraw":
+                const withdrawResult = await this.withdraw(args);
+                return withdrawResult;
             default:
                 throw new Error(`Unknown task: ${this.cloud.task}`);
         }
+    }
+
+    private async withdraw(args: {
+        contractAddress: string;
+    }): Promise<string> {
+        await this.compile();
+        const admin = PrivateKey.fromBase58(process.env.ADMIN_PRIVATE_KEY ?? "");
+        const sender = admin.toPublicKey();
+        const contractAddress = PublicKey.fromBase58(args.contractAddress);
+        const zkApp = new Quiz(contractAddress);
+        await fetchMinaAccount({ publicKey: sender, force: true });
+        const tx = await Mina.transaction(
+            { sender, fee: await fee(), memo: "withdraw" },
+            async () => {
+                await zkApp.withdraw();
+            }
+        );
+        await tx.prove();
+        tx.sign([admin]);
+        const txSent = await sendTx(tx, "withdraw", this.cloud.chain);
+        return await this.handleTransactionResult(txSent, {
+            sender: sender.toBase58(),
+            contractAddress: contractAddress.toBase58(),
+            type: "withdraw"
+        });
     }
 
     private async payoutOneWinner(args: {

@@ -462,6 +462,18 @@ describe('QuizWorker Tests', () => {
             expect(result.success).toBeTruthy();
             expect(result.result.result).toBeDefined();
         });
+        it('should withdraw', async () => {
+            const response = await api.execute({
+                developer: author,
+                repo: name,
+                transactions: [],
+                task: "withdraw",
+                args: JSON.stringify({
+                    contractAddress: contract.contractAddress,
+                }),
+                metadata: "withdraw test",
+            });
+        });
     }
 });
 
