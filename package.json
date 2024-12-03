@@ -1,6 +1,6 @@
 {
   "name": "choz-worker",
-  "version": "0.0.7",
+  "version": "0.0.15",
   "author": "BlocksOnChain",
   "scripts": {
     "test": "jest",
@@ -17,6 +17,8 @@
     "encrypt.local": "jest --chain=local --cloud=local --deploy=false --one=false --many=false --send=false --encrypt=true",
     "encrypt.devnet": "jest --chain=devnet --deploy=false --one=false --many=false --send=false --encrypt=true",
     "test:quiz": "jest quiz.test.ts --detectOpenHandles",
+    "quiz.compile": "jest quiz.test.ts --chain=local --cloud=local --compile=true --deploy=false --one=false",
+    "quiz.deploy": "jest quiz.test.ts --chain=local --cloud=local --deploy=true --one=false",
     "quiz.local": "jest quiz.test.ts --chain=local --cloud=local --compile=true --deploy=true --one=true",
     "quiz.lightnet.deploy": "jest quiz.test.ts --chain=lightnet --cloud=local --deploy=true --one=false",
     "quiz.lightnet.run": "jest quiz.test.ts --chain=lightnet --cloud=local --deploy=false --one=true",
@@ -32,6 +34,7 @@
     "typescript": "^5.5.3"
   },
   "dependencies": {
+    "dotenv": "^16.4.5",
     "mina-signer": "^3.0.7",
     "o1js": "^2.0.0",
     "zkcloudworker": "^0.16.6"

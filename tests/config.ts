@@ -13,4 +13,4 @@ export const contract: ContractConfig = {
   contractAddress: "B62qoz8c3U1DMMyQcRwciARwyKMrayfbtkZMQBUiAsSjkLEyVJtf4CP",
 };
 
-export const DEPLOYER = env.DEPLOYER_PRIVATE_KEY;
+export const DEPLOYER = process.env.ADMIN_PRIVATE_KEY;

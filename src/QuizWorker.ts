@@ -29,11 +29,14 @@ import {
     Field,
     MerkleMap,
     Proof,
+    fetchAccount,
+    Permissions
 } from "o1js";
-import { adminKey, Quiz, QuizState, WinnerState } from "./Quiz";
+import { Quiz, QuizState, WinnerState } from "./Quiz";
 import { ScoreCalculationLoop, UserAnswers, CorrectAnswers, ScoreProof } from "./ScoreCalculationLoop";
 import { Winner, WinnerInput, WinnerMap, WinnerOutput, WinnersProof, WinnersProver } from "./WinnersProver";
 import { IndexedMerkleMapBase } from "o1js/dist/node/lib/provable/merkle-tree-indexed";
+import { AuthRequired } from "o1js/dist/node/bindings/mina-transaction/gen/transaction";
 
 export class QuizWorker extends zkCloudWorker {
     static quizVerificationKey: VerificationKey | undefined = undefined;
@@ -89,59 +92,15 @@ export class QuizWorker extends zkCloudWorker {
         }
     }
 
-    private async deployQuiz(contractAddress: PublicKey): Promise<string> {
-        await this.compile();
-        const deployerKeyPair = await this.cloud.getDeployer();
-        if (deployerKeyPair === undefined)
-            throw new Error("deployerKeyPair is undefined");
-
-        const deployer = PrivateKey.fromBase58(deployerKeyPair.privateKey);
-        console.log("deployer private key!", deployer.toBase58());
-        const sender = deployer.toPublicKey();
-        const zkApp = new Quiz(contractAddress);
-        const tx = await Mina.transaction(
-            { sender, fee: await fee(), memo: "deploy quiz" },
-            async () => {
-                await zkApp.deploy({});
-                zkApp.account.zkappUri.set("https://choz.io");
-            }
-        );
-        await tx.prove();
-        tx.sign([deployer]);
-        const txSent = await tx.send();
-        await this.cloud.releaseDeployer({
-            publicKey: deployerKeyPair.publicKey,
-            txsHashes: txSent?.hash ? [txSent.hash] : [],
-        });
-        return txSent?.hash ?? "Error sending transaction";
-    }
-
-    private async buildDeployQuizTx(args: { contractAddress: string, sender: string }): Promise<string> {
-        await this.compile();
-        const zkApp = new Quiz(PublicKey.fromBase58(args.contractAddress));
-        const tx = await Mina.transaction(
-            { sender: PublicKey.fromBase58(args.sender), fee: await fee(), memo: "deploy quizbu" },
-            async () => {
-                AccountUpdate.fundNewAccount(PublicKey.fromBase58(args.sender));
-                await zkApp.deploy({ verificationKey: QuizWorker.quizVerificationKey });
-                zkApp.account.zkappUri.set("https://choz.io");
-            }
-        );
-        return JSON.stringify({ serializedTransaction: serializeTransaction(tx), transactionJson: tx.toJSON(), fee: tx.transaction.feePayer.body.fee, nonce: tx.transaction.feePayer.body.nonce, memo: tx.transaction.memo });
-    }
-
-    private async proveAndSendDeployQuizTx(args: { contractAddress: string, serializedTransaction: string, signedData: string,
+    private async proveAndSendDeployQuizTx(args: {
+        contractAddress: string, serializedTransaction: string, signedData: string,
         secretKey: string,
         startDate: string,
         totalRewardPoolAmount: string,
         rewardPerWinner: string,
         duration: string
-     }): Promise<string> {
+    }): Promise<string> {
         await this.compile();
-        const deployerKeyPair = await this.cloud.getDeployer();
-        if (deployerKeyPair === undefined)
-            throw new Error("deployerKeyPair is undefined");
-        const deployer = PrivateKey.fromBase58(deployerKeyPair.privateKey);
         const zkApp = new Quiz(PublicKey.fromBase58(args.contractAddress));
         const signedJson = JSON.parse(args.signedData);
         console.log("signedJson is here on prove", signedJson);
@@ -149,7 +108,7 @@ export class QuizWorker extends zkCloudWorker {
             args.serializedTransaction,
             signedJson
         );
-        console.log("Rebuild params:", { sender, fee, nonce, memo });
+        console.log("Rebuild params:", { sender: sender.toBase58(), fee: fee.toString(), nonce: nonce.toString(), memo });
         const reTransaction = await Mina.transaction(
             { sender: sender, fee: fee, nonce: nonce, memo: memo },
             async () => {
@@ -258,12 +217,9 @@ export class QuizWorker extends zkCloudWorker {
 
     public async initWinnerMap(contractAddress: string): Promise<string> {
         await this.compile();
-        const privateKey = PrivateKey.random();
-        const deployerKeypair = await this.cloud.getDeployer();
-        if (deployerKeypair === undefined)
-            throw new Error("deployerKeypair is undefined");
-        const deployer = PrivateKey.fromBase58(deployerKeypair.privateKey);
-        const sender = deployer.toPublicKey();
+        const admin = PrivateKey.fromBase58(process.env.ADMIN_PRIVATE_KEY ?? "");
+        const sender = admin.toPublicKey();
+        console.log("this is sender:", sender.toBase58());
         const proof = await WinnersProver.init(new WinnerInput({
             contractAddress: PublicKey.fromBase58(contractAddress),
             previousWinner: new Winner({
@@ -286,12 +242,22 @@ export class QuizWorker extends zkCloudWorker {
             }
         );
         await tx.prove();
-        tx.sign([deployer]);
-        const txSent = await tx.send();
+        tx.sign([admin]);
+        const txSent = await sendTx(tx, "init winner map", this.cloud.chain);
+        if (txSent === "Error sending transaction") return txSent;
         await this.cloud.releaseDeployer({
-            publicKey: deployerKeypair.publicKey.toString(),
+            publicKey: admin.toPublicKey().toBase58(),
             txsHashes: txSent?.hash ? [txSent.hash] : [],
         });
+        if (txSent?.hash)
+            this.cloud.publishTransactionMetadata({
+                txId: txSent?.hash,
+                metadata: {
+                    sender: sender.toBase58(),
+                    contractAddress: contractAddress,
+                    type: "init winner map"
+                } as any,
+            });
         return txSent?.hash ? JSON.stringify({ auxiliaryOutput: serializeIndexedMap(proof.auxiliaryOutput), proof: proof.proof.toJSON() }, null, 2) : "Error sending transaction";
     }
 
@@ -330,27 +296,18 @@ export class QuizWorker extends zkCloudWorker {
         switch (this.cloud.task) {
             case "calculateScore":
                 return await this.calculateScore(args);
-            case "deployQuiz":
-                return await this.deployQuiz(PublicKey.fromBase58(args.contractAddress));
-            case "buildDeployQuizTx":
-                return await this.buildDeployQuizTx(args);
             case "proveAndSendDeployQuizTx":
                 return await this.proveAndSendDeployQuizTx(args);
-            case "initQuiz":
-                const initQuizResult = await this.initQuiz(args);
-                await sleep(1000);
-                return initQuizResult;
             case "initWinnerMap":
                 const initWinnerMapResult = await this.initWinnerMap(args.contractAddress);
-                await sleep(1000);
                 return initWinnerMapResult;
-
             case "addWinner":
                 return await this.addWinner(args);
-
+            case "payoutOneWinner":
+                const payoutOneWinnerResult = await this.payoutOneWinner(args);
+                return payoutOneWinnerResult;
             case "payoutWinners":
                 const payoutWinnersResult = await this.payoutWinners(args);
-                await sleep(1000);
                 return payoutWinnersResult;
 
             default:
@@ -358,45 +315,59 @@ export class QuizWorker extends zkCloudWorker {
         }
     }
 
-    private async initQuiz(args: {
+    private async payoutOneWinner(args: {
         contractAddress: string;
-        secretKey: string;
-        duration: string;
-        startDate: string;
-        totalRewardPoolAmount: string;
-        rewardPerWinner: string;
+        winner: string;
+        proof: JsonProof;
     }): Promise<string> {
         await this.compile();
-        const privateKey = PrivateKey.random();
-
-        const deployerKeypair = await this.cloud.getDeployer();
-        if (deployerKeypair === undefined)
-            throw new Error("deployerKeypair is undefined");
-        const deployer = PrivateKey.fromBase58(deployerKeypair.privateKey);
-        const sender = deployer.toPublicKey();
+        let admin: PrivateKey;
+        if (process.env.ADMIN_PRIVATE_KEY === undefined) {
+            console.log("ADMIN_PRIVATE_KEY is undefined");
+            const deployerKeyPair = await this.cloud.getDeployer();
+            if (deployerKeyPair === undefined) throw new Error("deployerKeyPair is undefined");
+            admin = PrivateKey.fromBase58(deployerKeyPair.privateKey);
+        } else {
+            admin = PrivateKey.fromBase58(process.env.ADMIN_PRIVATE_KEY);
+        }
+        const sender = admin.toPublicKey();
         const contractAddress = PublicKey.fromBase58(args.contractAddress);
         const zkApp = new Quiz(contractAddress);
+        await fetchMinaAccount({ publicKey: sender, force: true });
+        const winnerAccount = await fetchMinaAccount({ publicKey: PublicKey.fromBase58(args.winner) });
+        /*         if (winnerAccount.account === undefined || winnerAccount.account?.permissions?.receive != Permissions.none()) {
+                    console.error("Winner account does not exist so skipping payout");
+                    return JSON.stringify({ success: false, tx: undefined, error: "Winner account does not exist so skipping payout" });
+                } */
 
-        const rewardPerWinner = UInt64.from(args.rewardPerWinner);
         const tx = await Mina.transaction(
-            { sender, fee: await fee(), memo: "init quiz" },
+            { sender, fee: 1e10, memo: "payout one winner" },
             async () => {
-                await zkApp.initQuizState(
-                    Field(args.secretKey),
-                    UInt64.from(args.duration),
-                    UInt64.from(args.startDate),
-                    UInt64.from(args.totalRewardPoolAmount),
-                    rewardPerWinner
+                await zkApp.payoutByOne(
+                    await WinnersProof.fromJSON(args.proof),
                 );
             }
         );
 
         await tx.prove();
-        tx.sign([deployer]);
+        tx.sign([admin]);
 
-        const txSent = await sendTx(tx, "init quiz", this.cloud.chain);
+        const txSent = await sendTx(tx, "payout one winner", this.cloud.chain);
+        if (txSent === "Error sending transaction") return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
 
-        return txSent ?? "Sended tx";
+        if (txSent?.hash && txSent.status !== "rejected")
+            this.cloud.publishTransactionMetadata({
+                txId: txSent?.hash,
+                metadata: {
+                    sender: sender.toBase58(),
+                    contractAddress: contractAddress.toBase58(),
+                    winner: args.winner,
+                    type: "payout one winner"
+                } as any,
+            });
+        if (txSent?.errors) console.error("txSent?.errors", txSent?.errors);
+
+        return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
     }
 
     private async payoutWinners(args: {
@@ -407,21 +378,98 @@ export class QuizWorker extends zkCloudWorker {
         winner2Proof: JsonProof;
     }): Promise<string> {
         await this.compile();
-        const privateKey = PrivateKey.random();
-        const deployerKeypair = await this.cloud.getDeployer();
-        if (deployerKeypair === undefined)
-            throw new Error("deployerKeypair is undefined");
-        const deployer = PrivateKey.fromBase58(deployerKeypair.privateKey);
-        const sender = deployer.toPublicKey();
+        let admin: PrivateKey;
+        if (process.env.ADMIN_PRIVATE_KEY === undefined) {
+            console.log("ADMIN_PRIVATE_KEY is undefined");
+            const deployerKeyPair = await this.cloud.getDeployer();
+            if (deployerKeyPair === undefined) throw new Error("deployerKeyPair is undefined");
+            admin = PrivateKey.fromBase58(deployerKeyPair.privateKey);
+        } else {
+            admin = PrivateKey.fromBase58(process.env.ADMIN_PRIVATE_KEY);
+        }
+        const sender = admin.toPublicKey();
         const contractAddress = PublicKey.fromBase58(args.contractAddress);
         const zkApp = new Quiz(contractAddress);
-        await fetchMinaAccount({ publicKey: deployer.toPublicKey(), force: true });
-        await fetchMinaAccount({ publicKey: PublicKey.fromBase58(args.winner1), force: true });
-        await fetchMinaAccount({ publicKey: PublicKey.fromBase58(args.winner2), force: true });
+        await fetchMinaAccount({ publicKey: sender, force: true });
+        const winner1Account = await fetchMinaAccount({ publicKey: PublicKey.fromBase58(args.winner1) });
+        const winner2Account = await fetchMinaAccount({ publicKey: PublicKey.fromBase58(args.winner2) });
+        /*         if (winner1Account.account === undefined || winner1Account.account?.permissions?.receive != Permissions.none()) {
+                    if (winner2Account.account === undefined || winner2Account.account?.permissions?.receive != Permissions.none()) {
+                        console.error("Both winners accounts do not exist so skipping payout");
+                        return JSON.stringify({ success: false, tx: undefined, error: "Both winners accounts do not exist so skipping payout" });
+                    }
+                    else {
+                        const tx = await Mina.transaction(
+                            { sender, fee: await fee(), memo: "payout one winner" },
+                            async () => {
+                                AccountUpdate.fundNewAccount(sender);
+                                await zkApp.payoutByOne(
+                                    await WinnersProof.fromJSON(args.winner2Proof),
+                                );
+                            }
+                        );
+        
+                        await tx.prove();
+                        tx.sign([admin]);
+        
+                        const txSent = await sendTx(tx, "payout only second winner", this.cloud.chain);
+                        if (txSent === "Error sending transaction") {
+                            console.error("Error sending transaction", txSent);
+                            return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
+                        }
+        
+                        if (txSent?.errors && txSent?.errors?.length > 0) console.error("txSent?.errors", txSent?.errors);
+                        if (txSent?.hash && txSent.status !== "rejected")
+                            this.cloud.publishTransactionMetadata({
+                                txId: txSent?.hash,
+                                metadata: {
+                                    sender: sender.toBase58(),
+                                    contractAddress: contractAddress,
+                                    winner2: args.winner2,
+                                    type: "payout winners"
+                                } as any,
+                            });
+                        return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
+                    }
+                } else if (winner2Account.account === undefined || winner2Account.account?.permissions?.receive != Permissions.none()) {
+                    const tx = await Mina.transaction(
+                        { sender, fee: await fee(), memo: "payout one winner" },
+                        async () => {
+                            AccountUpdate.fundNewAccount(sender);
+                            await zkApp.payoutByOne(
+                                await WinnersProof.fromJSON(args.winner1Proof),
+                            );
+                        }
+                    );
+        
+                    await tx.prove();
+                    tx.sign([admin]);
+        
+                    const txSent = await sendTx(tx, "payout only first winner", this.cloud.chain);
+                    if (txSent === "Error sending transaction") {
+                        console.error("Error sending transaction", txSent);
+                        return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
+                    }
+        
+                    if (txSent?.errors && txSent?.errors?.length > 0) console.error("txSent?.errors", txSent?.errors);
+        
+                    if (txSent?.hash && txSent.status !== "rejected")
+                        this.cloud.publishTransactionMetadata({
+                            txId: txSent?.hash,
+                            metadata: {
+                                sender: sender.toBase58(),
+                                contractAddress: contractAddress,
+                                winner1: args.winner1,
+                                winner2: args.winner2,
+                                type: "payout winners"
+                            } as any,
+                        });
+                    return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
+                } */
+        //else {
         const tx = await Mina.transaction(
             { sender, fee: await fee(), memo: "payout winners" },
             async () => {
-                const au = AccountUpdate.fundNewAccount(deployer.toPublicKey(), 2);
                 await zkApp.payoutByTwo(
                     await WinnersProof.fromJSON(args.winner1Proof),
                     await WinnersProof.fromJSON(args.winner2Proof),
@@ -430,11 +478,27 @@ export class QuizWorker extends zkCloudWorker {
         );
 
         await tx.prove();
-        tx.sign([deployer, privateKey]);
+        tx.sign([admin]);
 
         const txSent = await sendTx(tx, "payout winners", this.cloud.chain);
-
-        return txSent ?? "Sended tx";
+        if (txSent === "Error sending transaction") {
+            console.error("Error sending transaction", txSent);
+            return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
+        }
+        if (txSent?.hash && txSent.status !== "rejected")
+            this.cloud.publishTransactionMetadata({
+                txId: txSent?.hash,
+                metadata: {
+                    sender: sender.toBase58(),
+                    contractAddress: contractAddress,
+                    winner1: args.winner1,
+                    winner2: args.winner2,
+                    type: "payout winners"
+                } as any,
+            });
+        if (txSent?.errors) console.error("txSent?.errors", txSent?.errors);
+        return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
+        //}
     }
 }
 
@@ -482,6 +546,7 @@ async function sendTx(
                 } status: ${txIncluded.status}`
             );
         }
+        return txSent;
     } catch (error) {
         if (chain !== "zeko") console.error("Error sending tx", error);
     }
