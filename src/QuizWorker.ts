@@ -335,13 +335,40 @@ export class QuizWorker extends zkCloudWorker {
         const zkApp = new Quiz(contractAddress);
         await fetchMinaAccount({ publicKey: sender, force: true });
         const winnerAccount = await fetchMinaAccount({ publicKey: PublicKey.fromBase58(args.winner) });
-        /*         if (winnerAccount.account === undefined || winnerAccount.account?.permissions?.receive != Permissions.none()) {
-                    console.error("Winner account does not exist so skipping payout");
-                    return JSON.stringify({ success: false, tx: undefined, error: "Winner account does not exist so skipping payout" });
-                } */
+        if (winnerAccount.account === undefined) {
+            const tx = await Mina.transaction(
+                { sender, fee: await fee(), memo: "payout one winner" },
+                async () => {
+                    AccountUpdate.fundNewAccount(sender);
+                    await zkApp.payoutByOne(
+                        await WinnersProof.fromJSON(args.proof),
+                    );
+                }
+            );
+
+            await tx.prove();
+            tx.sign([admin]);
+
+            const txSent = await sendTx(tx, "payout one winner", this.cloud.chain);
+            if (txSent === "Error sending transaction") return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
+
+            if (txSent?.hash && txSent.status !== "rejected")
+                this.cloud.publishTransactionMetadata({
+                    txId: txSent?.hash,
+                    metadata: {
+                        sender: sender.toBase58(),
+                        contractAddress: contractAddress.toBase58(),
+                        winner: args.winner,
+                        type: "payout one winner"
+                    } as any,
+                });
+            if (txSent?.errors) console.error("txSent?.errors", txSent?.errors);
+
+            return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
+        }
 
         const tx = await Mina.transaction(
-            { sender, fee: 1e10, memo: "payout one winner" },
+            { sender, fee: await fee(), memo: "payout one winner" },
             async () => {
                 await zkApp.payoutByOne(
                     await WinnersProof.fromJSON(args.proof),
@@ -393,112 +420,145 @@ export class QuizWorker extends zkCloudWorker {
         await fetchMinaAccount({ publicKey: sender, force: true });
         const winner1Account = await fetchMinaAccount({ publicKey: PublicKey.fromBase58(args.winner1) });
         const winner2Account = await fetchMinaAccount({ publicKey: PublicKey.fromBase58(args.winner2) });
-        /*         if (winner1Account.account === undefined || winner1Account.account?.permissions?.receive != Permissions.none()) {
-                    if (winner2Account.account === undefined || winner2Account.account?.permissions?.receive != Permissions.none()) {
-                        console.error("Both winners accounts do not exist so skipping payout");
-                        return JSON.stringify({ success: false, tx: undefined, error: "Both winners accounts do not exist so skipping payout" });
-                    }
-                    else {
-                        const tx = await Mina.transaction(
-                            { sender, fee: await fee(), memo: "payout one winner" },
-                            async () => {
-                                AccountUpdate.fundNewAccount(sender);
-                                await zkApp.payoutByOne(
-                                    await WinnersProof.fromJSON(args.winner2Proof),
-                                );
-                            }
+        if (winner1Account.account === undefined || winner1Account.account?.permissions?.receive != Permissions.none()) {
+            if (winner2Account.account === undefined || winner2Account.account?.permissions?.receive != Permissions.none()) {
+
+                const tx = await Mina.transaction(
+                    { sender, fee: await fee(), memo: "payout winners" },
+                    async () => {
+                        AccountUpdate.fundNewAccount(sender, 2);
+                        await zkApp.payoutByTwo(
+                            await WinnersProof.fromJSON(args.winner1Proof),
+                            await WinnersProof.fromJSON(args.winner2Proof),
                         );
-        
-                        await tx.prove();
-                        tx.sign([admin]);
-        
-                        const txSent = await sendTx(tx, "payout only second winner", this.cloud.chain);
-                        if (txSent === "Error sending transaction") {
-                            console.error("Error sending transaction", txSent);
-                            return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
-                        }
-        
-                        if (txSent?.errors && txSent?.errors?.length > 0) console.error("txSent?.errors", txSent?.errors);
-                        if (txSent?.hash && txSent.status !== "rejected")
-                            this.cloud.publishTransactionMetadata({
-                                txId: txSent?.hash,
-                                metadata: {
-                                    sender: sender.toBase58(),
-                                    contractAddress: contractAddress,
-                                    winner2: args.winner2,
-                                    type: "payout winners"
-                                } as any,
-                            });
-                        return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
                     }
-                } else if (winner2Account.account === undefined || winner2Account.account?.permissions?.receive != Permissions.none()) {
-                    const tx = await Mina.transaction(
-                        { sender, fee: await fee(), memo: "payout one winner" },
-                        async () => {
-                            AccountUpdate.fundNewAccount(sender);
-                            await zkApp.payoutByOne(
-                                await WinnersProof.fromJSON(args.winner1Proof),
-                            );
-                        }
-                    );
-        
-                    await tx.prove();
-                    tx.sign([admin]);
-        
-                    const txSent = await sendTx(tx, "payout only first winner", this.cloud.chain);
-                    if (txSent === "Error sending transaction") {
-                        console.error("Error sending transaction", txSent);
-                        return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
-                    }
-        
-                    if (txSent?.errors && txSent?.errors?.length > 0) console.error("txSent?.errors", txSent?.errors);
-        
-                    if (txSent?.hash && txSent.status !== "rejected")
-                        this.cloud.publishTransactionMetadata({
-                            txId: txSent?.hash,
-                            metadata: {
-                                sender: sender.toBase58(),
-                                contractAddress: contractAddress,
-                                winner1: args.winner1,
-                                winner2: args.winner2,
-                                type: "payout winners"
-                            } as any,
-                        });
-                    return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
-                } */
-        //else {
-        const tx = await Mina.transaction(
-            { sender, fee: await fee(), memo: "payout winners" },
-            async () => {
-                await zkApp.payoutByTwo(
-                    await WinnersProof.fromJSON(args.winner1Proof),
-                    await WinnersProof.fromJSON(args.winner2Proof),
                 );
+
+                await tx.prove();
+                tx.sign([admin]);
+
+                const txSent = await sendTx(tx, "payout winners", this.cloud.chain);
+                if (txSent === "Error sending transaction") {
+                    console.error("Error sending transaction", txSent);
+                    return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
+                }
+                if (txSent?.hash && txSent.status !== "rejected")
+                    this.cloud.publishTransactionMetadata({
+                        txId: txSent?.hash,
+                        metadata: {
+                            sender: sender.toBase58(),
+                            contractAddress: contractAddress,
+                            winner1: args.winner1,
+                            winner2: args.winner2,
+                            type: "payout winners"
+                        } as any,
+                    });
+                if (txSent?.errors) console.error("txSent?.errors", txSent?.errors);
+                return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
             }
-        );
+            else {
+                const tx = await Mina.transaction(
+                    { sender, fee: await fee(), memo: "payout two winners" },
+                    async () => {
+                        AccountUpdate.fundNewAccount(sender);
+                        await zkApp.payoutByTwo(
+                            await WinnersProof.fromJSON(args.winner1Proof),
+                            await WinnersProof.fromJSON(args.winner2Proof),
+                        );
+                    }
+                );
 
-        await tx.prove();
-        tx.sign([admin]);
+                await tx.prove();
+                tx.sign([admin]);
 
-        const txSent = await sendTx(tx, "payout winners", this.cloud.chain);
-        if (txSent === "Error sending transaction") {
-            console.error("Error sending transaction", txSent);
-            return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
+                const txSent = await sendTx(tx, "payout only second winner", this.cloud.chain);
+                if (txSent === "Error sending transaction") {
+                    console.error("Error sending transaction", txSent);
+                    return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
+                }
+
+                if (txSent?.errors && txSent?.errors?.length > 0) console.error("txSent?.errors", txSent?.errors);
+                if (txSent?.hash && txSent.status !== "rejected")
+                    this.cloud.publishTransactionMetadata({
+                        txId: txSent?.hash,
+                        metadata: {
+                            sender: sender.toBase58(),
+                            contractAddress: contractAddress,
+                            winner2: args.winner2,
+                            type: "payout winners"
+                        } as any,
+                    });
+                return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
+            }
+        } else if (winner2Account.account === undefined) {
+            const tx = await Mina.transaction(
+                { sender, fee: await fee(), memo: "payout two winners" },
+                async () => {
+                    AccountUpdate.fundNewAccount(sender);
+                    await zkApp.payoutByTwo(
+                        await WinnersProof.fromJSON(args.winner1Proof),
+                        await WinnersProof.fromJSON(args.winner2Proof),
+                    );
+                }
+            );
+
+            await tx.prove();
+            tx.sign([admin]);
+
+            const txSent = await sendTx(tx, "payout only first winner", this.cloud.chain);
+            if (txSent === "Error sending transaction") {
+                console.error("Error sending transaction", txSent);
+                return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
+            }
+
+            if (txSent?.errors && txSent?.errors?.length > 0) console.error("txSent?.errors", txSent?.errors);
+
+            if (txSent?.hash && txSent.status !== "rejected")
+                this.cloud.publishTransactionMetadata({
+                    txId: txSent?.hash,
+                    metadata: {
+                        sender: sender.toBase58(),
+                        contractAddress: contractAddress,
+                        winner1: args.winner1,
+                        winner2: args.winner2,
+                        type: "payout winners"
+                    } as any,
+                });
+            return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
         }
-        if (txSent?.hash && txSent.status !== "rejected")
-            this.cloud.publishTransactionMetadata({
-                txId: txSent?.hash,
-                metadata: {
-                    sender: sender.toBase58(),
-                    contractAddress: contractAddress,
-                    winner1: args.winner1,
-                    winner2: args.winner2,
-                    type: "payout winners"
-                } as any,
-            });
-        if (txSent?.errors) console.error("txSent?.errors", txSent?.errors);
-        return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
-        //}
+        else {
+            const tx = await Mina.transaction(
+                { sender, fee: await fee(), memo: "payout winners" },
+                async () => {
+                    await zkApp.payoutByTwo(
+                        await WinnersProof.fromJSON(args.winner1Proof),
+                        await WinnersProof.fromJSON(args.winner2Proof),
+                    );
+                }
+            );
+
+            await tx.prove();
+            tx.sign([admin]);
+
+            const txSent = await sendTx(tx, "payout winners", this.cloud.chain);
+            if (txSent === "Error sending transaction") {
+                console.error("Error sending transaction", txSent);
+                return JSON.stringify({ success: false, tx: txSent, error: "Error sending transaction" });
+            }
+            if (txSent?.hash && txSent.status !== "rejected")
+                this.cloud.publishTransactionMetadata({
+                    txId: txSent?.hash,
+                    metadata: {
+                        sender: sender.toBase58(),
+                        contractAddress: contractAddress,
+                        winner1: args.winner1,
+                        winner2: args.winner2,
+                        type: "payout winners"
+                    } as any,
+                });
+            if (txSent?.errors) console.error("txSent?.errors", txSent?.errors);
+            return txSent?.errors ? JSON.stringify({ success: false, tx: txSent, error: txSent.errors }) : JSON.stringify({ success: true, tx: txSent });
+        }
     }
 }
 

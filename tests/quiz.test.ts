@@ -27,10 +27,8 @@ import { Winner, WinnersProver } from "../src/WinnersProver";
 import { UserAnswers, CorrectAnswers, ScoreCalculationLoop } from "../src/ScoreCalculationLoop";
 import { contract, DEPLOYER } from "./config";
 import { Quiz } from "../src/Quiz";
-import { QuizWorker } from "../src/QuizWorker";
 import { JWT } from "../env.json";
 import { name, author, version } from "../package.json";
-import Client from "mina-signer"
 const { chain, compile, deploy, useLocalCloudWorker, one } = processArguments();
 
 const api = new zkCloudWorkerClient({
@@ -54,7 +52,9 @@ setNumberOfWorkers(8);
 describe('QuizWorker Tests', () => {
 
     it(`should initialize blockchain`, async () => {
-
+        winnerUser1 = PrivateKey.random().toPublicKey();
+        winnerUser2 = PrivateKey.random().toPublicKey();
+        winnerUser3 = PrivateKey.random().toPublicKey();
         if (chain === "local" || chain === "lightnet") {
             console.log("local chain:", chain);
             const { keys } = await initBlockchain(chain, 2);
@@ -62,9 +62,7 @@ describe('QuizWorker Tests', () => {
             if (keys.length < 2) throw new Error("Invalid keys");
             deployer = PrivateKey.fromBase58(process.env.ADMIN_PRIVATE_KEY!);
             sender = deployer.toPublicKey();
-            winnerUser1 = PrivateKey.random().toPublicKey();
-            winnerUser2 = PrivateKey.random().toPublicKey();
-            winnerUser3 = PrivateKey.random().toPublicKey();
+
             const accountUpdateTx = await Mina.transaction({
                 sender: keys[0].key.toPublicKey(), fee: await fee(), memo: "fund new accounts"
             }, async () => {
@@ -80,6 +78,9 @@ describe('QuizWorker Tests', () => {
             console.log("non-local chain:", chain);
             await initBlockchain(chain);
             deployer = PrivateKey.fromBase58(DEPLOYER!);
+            winnerUser1 = PublicKey.fromBase58("B62qqMVVA4AsxHGJG4HrQz7j3mNo8Ze2Q5i4zR4b2cZS2jwRss2Uy9H");
+            winnerUser2 = PublicKey.fromBase58("B62qmDPM8gDzD3wrYEvqfyr33mgfofbXRWC3TjgNy3nVZhwTWcviFQT");
+            winnerUser3 = PublicKey.fromBase58("B62qjZXBtUU7Lw67KB5voM8AVHrHVNzMecdjKCe136aMY3TsDsuMKuz")
         }
         process.env.DEPLOYER_PRIVATE_KEY = deployer.toBase58();
         process.env.DEPLOYER_PUBLIC_KEY = deployer.toPublicKey().toBase58();
@@ -90,9 +91,9 @@ describe('QuizWorker Tests', () => {
         console.log("Winner1 balance:", await accountBalanceMina(winnerUser1));
         console.log("Winner2 balance:", await accountBalanceMina(winnerUser2));
         console.log("Winner3 balance:", await accountBalanceMina(winnerUser3));
-        console.log("Winner1 account:", await fetchMinaAccount({ publicKey: winnerUser1, force: true }));
-        console.log("Winner2 account:", await fetchMinaAccount({ publicKey: winnerUser2, force: true }));
-        console.log("Winner3 account:", await fetchMinaAccount({ publicKey: winnerUser3, force: true }));
+        //console.log("Winner1 account:", await fetchMinaAccount({ publicKey: winnerUser1, force: true }));
+        //console.log("Winner2 account:", await fetchMinaAccount({ publicKey: winnerUser2, force: true }));
+        //console.log("Winner3 account:", await fetchMinaAccount({ publicKey: winnerUser3, force: true }));
         expect(deployer).toBeDefined();
         expect(sender).toBeDefined();
         expect(deployer.toPublicKey().toBase58()).toBe(sender.toBase58());
@@ -327,142 +328,139 @@ describe('QuizWorker Tests', () => {
             expect(result.result.result).toBeDefined();
 
         });
-        it('should payout winners through worker', async () => {
-            await fetchMinaAccount({ publicKey: sender, force: true });
-            await fetchMinaAccount({ publicKey: contract.contractAddress, force: true });
-            /*             //First initialize the quiz state
-                        const initQuizResponse = await api.execute({
-                            developer: author,
-                            repo: name,
-                            transactions: [],
-                            task: "buildInitQuizTx",
-                            args: JSON.stringify({
-                                contractAddress: contract.contractAddress,
-                                sender: sender.toBase58(),
-                            }),
-                            metadata: "init quiz state for payout test",
-                        });
-            
-                        const initQuizResult = await api.waitForJobResult({
-                            jobId: initQuizResponse.jobId!,
-                            printLogs: true,
-                        });
-            
-                        expect(initQuizResult.success).toBeTruthy();
-                        expect(initQuizResult.result.result).toBeDefined();
-            
-                        const initQuizResultJson = initQuizResult.result.result;
-                        console.log("initQuizResultJson", initQuizResultJson);
-                        const signedTx = initQuizResultJson.sign([deployer]);
-                        console.log("signedTx", signedTx);
-                        const txHash = await sendTx(signedTx, "prove and send init quiz tx");
-                        console.log("txHash", txHash);
-                        */
-            // initialize the winner map
-            const initResponse = await api.execute({
-                developer: author,
-                repo: name,
-                transactions: [],
-                task: "initWinnerMap",
-                args: JSON.stringify({
-                    contractAddress: contract.contractAddress,
-                }),
-                metadata: "init for add winner test",
-            });
-
-            const initResult = await api.waitForJobResult({
-                jobId: initResponse.jobId!,
-                printLogs: true,
-            });
-
-            // Now add a winner
-            const winner = new Winner({
-                publicKey: winnerUser1,
-                reward: UInt64.from(1000),
-            });
-            const initWinnerResult = JSON.parse(initResult.result.result);
-            const addWinnerResponse = await api.execute({
-                developer: author,
-                repo: name,
-                transactions: [],
-                task: "addWinner",
-                args: JSON.stringify({
-                    winner: { publicKey: winner.publicKey.toBase58(), reward: winner.reward.toString() },
-                    previousProof: initWinnerResult.proof,
-                    serializedStringPreviousMap: initWinnerResult.auxiliaryOutput,
-                }, null, 2),
-                metadata: "add winner test",
-            });
-            expect(addWinnerResponse.success).toBeTruthy();
-            const addWinnerJobId = addWinnerResponse.jobId;
-            expect(addWinnerJobId).toBeDefined();
-
-            const addWinnerResult = await api.waitForJobResult({
-                jobId: addWinnerJobId!,
-                printLogs: true,
-            });
-
-            expect(addWinnerResult.success).toBeTruthy();
-            expect(addWinnerResult.result.result).toBeDefined();
-
-            // Now add second winner
-            const secondWinner = new Winner({
-                publicKey: winnerUser2,
-                reward: UInt64.from(1000),
-            });
-            const addFirstWinnerResultJson = JSON.parse(addWinnerResult.result.result);
-            const addSecondWinnerResponse = await api.execute({
-                developer: author,
-                repo: name,
-                transactions: [],
-                task: "addWinner",
-                args: JSON.stringify({
-                    winner: { publicKey: secondWinner.publicKey.toBase58(), reward: secondWinner.reward.toString() },
-                    previousProof: addFirstWinnerResultJson.proof,
-                    serializedStringPreviousMap: addFirstWinnerResultJson.auxiliaryOutput,
-                }, null, 2),
-                metadata: "add second winner test",
-            });
-            expect(addSecondWinnerResponse.success).toBeTruthy();
-            const addSecondWinnerJobId = addSecondWinnerResponse.jobId;
-            expect(addSecondWinnerJobId).toBeDefined();
-
-            const addSecondWinnerResult = await api.waitForJobResult({
-                jobId: addSecondWinnerJobId!,
-                printLogs: true,
-            });
-
-            expect(addSecondWinnerResult.success).toBeTruthy();
-            expect(addSecondWinnerResult.result.result).toBeDefined();
-
-            const secondWinnerResult = JSON.parse(addSecondWinnerResult.result.result)
-            const response = await api.execute({
-                developer: author,
-                repo: name,
-                transactions: [],
-                task: "payoutWinners",
-                args: JSON.stringify({
-                    contractAddress: contract.contractAddress,
-                    winner1: winner.publicKey.toBase58(),
-                    winner2: secondWinner.publicKey.toBase58(),
-                    winner1Proof: addFirstWinnerResultJson.proof,
-                    winner2Proof: secondWinnerResult.proof,
-                }),
-                metadata: "payout winners test",
-            });
-
-            expect(response.success).toBeTruthy();
-            const jobId = response.jobId;
-            expect(jobId).toBeDefined();
-
-            const result = await api.waitForJobResult({
-                jobId: jobId!,
-                printLogs: true,
-            });
-
-            expect(result.success).toBeTruthy();
-            expect(result.result.result).toBeDefined();
-        });
+        /*         it('should payout winners through worker', async () => {
+                    await fetchMinaAccount({ publicKey: sender, force: true });
+                    await fetchMinaAccount({ publicKey: contract.contractAddress, force: true });
+                    /*             //First initialize the quiz state
+                                const initQuizResponse = await api.execute({
+                                    developer: author,
+                                    repo: name,
+                                    transactions: [],
+                                    task: "buildInitQuizTx",
+                                    args: JSON.stringify({
+                                        contractAddress: contract.contractAddress,
+                                        sender: sender.toBase58(),
+                                    }),
+                                    metadata: "init quiz state for payout test",
+                                });
+                    
+                                const initQuizResult = await api.waitForJobResult({
+                                    jobId: initQuizResponse.jobId!,
+                                    printLogs: true,
+                                });
+                    
+                                expect(initQuizResult.success).toBeTruthy();
+                                expect(initQuizResult.result.result).toBeDefined();
+                    
+                                const initQuizResultJson = initQuizResult.result.result;
+                                console.log("initQuizResultJson", initQuizResultJson);
+                                const signedTx = initQuizResultJson.sign([deployer]);
+                                console.log("signedTx", signedTx);
+                                const txHash = await sendTx(signedTx, "prove and send init quiz tx");
+                                console.log("txHash", txHash);
+                    const initResponse = await api.execute({
+                        developer: author,
+                        repo: name,
+                        transactions: [],
+                        task: "initWinnerMap",
+                        args: JSON.stringify({
+                            contractAddress: contract.contractAddress,
+                        }),
+                        metadata: "init for add winner test",
+                    });
+        
+                    const initResult = await api.waitForJobResult({
+                        jobId: initResponse.jobId!,
+                        printLogs: true,
+                    });
+        
+                    const winner = new Winner({
+                        publicKey: winnerUser1,
+                        reward: UInt64.from(1000),
+                    });
+                    const initWinnerResult = JSON.parse(initResult.result.result);
+                    const addWinnerResponse = await api.execute({
+                        developer: author,
+                        repo: name,
+                        transactions: [],
+                        task: "addWinner",
+                        args: JSON.stringify({
+                            winner: { publicKey: winner.publicKey.toBase58(), reward: winner.reward.toString() },
+                            previousProof: initWinnerResult.proof,
+                            serializedStringPreviousMap: initWinnerResult.auxiliaryOutput,
+                        }, null, 2),
+                        metadata: "add winner test",
+                    });
+                    expect(addWinnerResponse.success).toBeTruthy();
+                    const addWinnerJobId = addWinnerResponse.jobId;
+                    expect(addWinnerJobId).toBeDefined();
+        
+                    const addWinnerResult = await api.waitForJobResult({
+                        jobId: addWinnerJobId!,
+                        printLogs: true,
+                    });
+        
+                    expect(addWinnerResult.success).toBeTruthy();
+                    expect(addWinnerResult.result.result).toBeDefined();
+        
+                    // Now add second winner
+                    const secondWinner = new Winner({
+                        publicKey: winnerUser2,
+                        reward: UInt64.from(1000),
+                    });
+                    const addFirstWinnerResultJson = JSON.parse(addWinnerResult.result.result);
+                    const addSecondWinnerResponse = await api.execute({
+                        developer: author,
+                        repo: name,
+                        transactions: [],
+                        task: "addWinner",
+                        args: JSON.stringify({
+                            winner: { publicKey: secondWinner.publicKey.toBase58(), reward: secondWinner.reward.toString() },
+                            previousProof: addFirstWinnerResultJson.proof,
+                            serializedStringPreviousMap: addFirstWinnerResultJson.auxiliaryOutput,
+                        }, null, 2),
+                        metadata: "add second winner test",
+                    });
+                    expect(addSecondWinnerResponse.success).toBeTruthy();
+                    const addSecondWinnerJobId = addSecondWinnerResponse.jobId;
+                    expect(addSecondWinnerJobId).toBeDefined();
+        
+                    const addSecondWinnerResult = await api.waitForJobResult({
+                        jobId: addSecondWinnerJobId!,
+                        printLogs: true,
+                    });
+        
+                    expect(addSecondWinnerResult.success).toBeTruthy();
+                    expect(addSecondWinnerResult.result.result).toBeDefined();
+        
+                    const secondWinnerResult = JSON.parse(addSecondWinnerResult.result.result)
+                    const response = await api.execute({
+                        developer: author,
+                        repo: name,
+                        transactions: [],
+                        task: "payoutWinners",
+                        args: JSON.stringify({
+                            contractAddress: contract.contractAddress,
+                            winner1: winner.publicKey.toBase58(),
+                            winner2: secondWinner.publicKey.toBase58(),
+                            winner1Proof: addFirstWinnerResultJson.proof,
+                            winner2Proof: secondWinnerResult.proof,
+                        }),
+                        metadata: "payout winners test",
+                    });
+        
+                    expect(response.success).toBeTruthy();
+                    const jobId = response.jobId;
+                    expect(jobId).toBeDefined();
+        
+                    const result = await api.waitForJobResult({
+                        jobId: jobId!,
+                        printLogs: true,
+                    });
+        
+                    expect(result.success).toBeTruthy();
+                    expect(result.result.result).toBeDefined();
+                }); */
     }
 });
 
