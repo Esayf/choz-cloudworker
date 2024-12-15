@@ -4,13 +4,12 @@ interface ContractConfig {
   contractPrivateKey: PrivateKey;
   contractAddress: string;
 }
-
+const privateKey = PrivateKey.random();
 export const contract: ContractConfig = {
   contractPrivateKey: PrivateKey.fromBase58(
-    "EKEhZwSy9be82EqLT3s8Fa4QPxE8fTGiGW1w3XC4ho3RmWqBmQh2"
+    "EKEhREnW8b85JQzoa2J9b82HDy6CrTKFvWdEeDP7xrJWAhA4rGYE"
   ),
-  contractAddress: "B62qrZso6WMaxZPrkDHW9sa7BTtVKjHon6BJxUbN3q6PwdTNQXWvADD",
+  contractAddress: "B62qn3Y8r4kjRmEgsYMZR2CMf9cSvM8zBqpUp7tfSxF5JSNSr9rLVvf",
 };
 
-export const DEPLOYER = "EKFDvpBMGGa1bGrE9BhNLzr4VEBopt9ANfwTzE5Z3yqSBegiUUhk";
-// "B62qrvVL5oJWT8K4ijnq83V3MYHv95jhrJ2T3X56GL7nfowNFvcDFST"
+export const DEPLOYER = process.env.ADMIN_PRIVATE_KEY;

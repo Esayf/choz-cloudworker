@@ -8,3 +8,4 @@ cache/
 .pnp.loader.mjs
 .vscode/
 .zkcloudworker/
+.env
